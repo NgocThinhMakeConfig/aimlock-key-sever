@@ -7,6 +7,10 @@ const fs = require('fs');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
+
+
+app.set('trust proxy', 1);
+
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 const DB_PATH = process.env.NODE_ENV === 'production' ? '/tmp/keys.json' : './keys.json';
