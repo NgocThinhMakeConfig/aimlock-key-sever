@@ -1,125 +1,89 @@
+/* ============================================================ */
+/* AIMLOCK KEY SERVER v2.0 — FULL FEATURES */
+/* ============================================================ */
 const express = require('express');
 const cors = require('cors');
+const Database = require('better-sqlite3');
 const rateLimit = require('express-rate-limit');
-const initSqlJs = require('sql.js');
-const fs = require('fs');
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_default_token_change_me';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 
-app.use(cors({ origin: '*', methods: ['GET', 'POST'] }));
-app.use(express.json());
+/* ============================================== */
+/* ===== CORS — FIX CHO MOBILE ===== */
+/* ============================================== */
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
+  credentials: false,
+  maxAge: 86400  // Cache preflight 24h
+}));
 
+// ⭐ QUAN TRỌNG: Xử lý OPTIONS preflight cho mọi route
+app.options('*', cors());
+
+app.use(express.json({ limit: '10kb' }));
+
+/* ============================================== */
+/* ===== RATE LIMIT ===== */
+/* ============================================== */
 const limiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 30,
-  message: { valid: false, error: 'QUA NHIEU YEU CAU. THU LAI SAU.' }
+  max: 120,  // ⭐ Tăng từ 30 → 120
+  message: { valid: false, error: 'QUÁ NHIỀU YÊU CẦU. THỬ LẠI SAU.' },
+  standardHeaders: true,
+  legacyHeaders: false
 });
 app.use('/api/', limiter);
 
-const DB_PATH = '/tmp/database.sqlite';
-let db = null;
-let SQL = null;
+/* ============================================== */
+/* ===== DATABASE ===== */
+/* ============================================== */
+const DB_PATH = process.env.NODE_ENV === 'production' 
+  ? '/tmp/database.sqlite' 
+  : './database.sqlite';
 
-async function initDB() {
-  SQL = await initSqlJs();
-  
-  if (fs.existsSync(DB_PATH)) {
-    const fileBuffer = fs.readFileSync(DB_PATH);
-    db = new SQL.Database(fileBuffer);
-  } else {
-    db = new SQL.Database();
-  }
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS keys (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      key_code TEXT UNIQUE NOT NULL,
-      status TEXT DEFAULT 'unused',
-      duration_days INTEGER DEFAULT 30,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      activated_at DATETIME,
-      expires_at DATETIME,
-      used_by TEXT,
-      device_id TEXT,
-      max_devices INTEGER DEFAULT 1,
-      note TEXT
-    )
-  `);
-  
-  db.run(`
-    CREATE TABLE IF NOT EXISTS logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      key_code TEXT,
-      action TEXT,
-      device_id TEXT,
-      ip TEXT,
-      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  
-  saveDB();
-  console.log('Database initialized');
-}
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
 
-function saveDB() {
-  try {
-    const data = db.export();
-    const buffer = Buffer.from(data);
-    fs.writeFileSync(DB_PATH, buffer);
-  } catch(e) {
-    console.error('Save DB error:', e);
-  }
-}
+// Bảng keys
+db.exec(`
+  CREATE TABLE IF NOT EXISTS keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_code TEXT UNIQUE NOT NULL,
+    status TEXT DEFAULT 'unused',
+    duration_days INTEGER DEFAULT 30,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    activated_at DATETIME,
+    expires_at DATETIME,
+    used_by TEXT,
+    device_id TEXT,
+    device_locked_at DATETIME,
+    last_seen DATETIME,
+    max_devices INTEGER DEFAULT 1,
+    note TEXT
+  )
+`);
 
-function queryOne(sql, params) {
-  try {
-    const stmt = db.prepare(sql);
-    stmt.bind(params || []);
-    if (stmt.step()) {
-      const row = stmt.getAsObject();
-      stmt.free();
-      return row;
-    }
-    stmt.free();
-    return null;
-  } catch(e) {
-    console.error('Query error:', e);
-    return null;
-  }
-}
+// Bảng logs
+db.exec(`
+  CREATE TABLE IF NOT EXISTS logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_code TEXT,
+    action TEXT,
+    device_id TEXT,
+    ip TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
 
-function queryAll(sql, params) {
-  try {
-    const stmt = db.prepare(sql);
-    stmt.bind(params || []);
-    const rows = [];
-    while (stmt.step()) {
-      rows.push(stmt.getAsObject());
-    }
-    stmt.free();
-    return rows;
-  } catch(e) {
-    console.error('Query error:', e);
-    return [];
-  }
-}
-
-function execute(sql, params) {
-  try {
-    db.run(sql, params || []);
-    saveDB();
-    return true;
-  } catch(e) {
-    console.error('Execute error:', e);
-    return false;
-  }
-}
-
-function generateKey(prefix) {
-  prefix = prefix || 'AIM';
+/* ============================================== */
+/* ===== HELPERS ===== */
+/* ============================================== */
+function generateKey(prefix = 'AIM') {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let parts = [];
   for (let p = 0; p < 4; p++) {
@@ -132,161 +96,274 @@ function generateKey(prefix) {
   return prefix + '-' + parts.join('-');
 }
 
-function logAction(keyCode, action, deviceId, ip) {
-  try {
-    execute('INSERT INTO logs (key_code, action, device_id, ip) VALUES (?, ?, ?, ?)',
-      [keyCode, action, deviceId || null, ip || null]);
-  } catch(e) { console.error('Log error:', e); }
+function isValidKeyFormat(key) {
+  // Format: XXX-XXXX-XXXX-XXXX-XXXX (dài 22-24 ký tự)
+  if (!key || typeof key !== 'string') return false;
+  if (key.length < 10 || key.length > 30) return false;
+  return /^[A-Z0-9\-]+$/i.test(key);
 }
 
-app.get('/', function(req, res) {
+function logAction(keyCode, action, deviceId, ip) {
+  try {
+    db.prepare('INSERT INTO logs (key_code, action, device_id, ip) VALUES (?, ?, ?, ?)')
+      .run(keyCode, action, deviceId || null, ip || null);
+  } catch(e) { 
+    console.error('Log error:', e.message); 
+  }
+}
+
+function getClientIp(req) {
+  return req.ip || 
+    req.headers['x-forwarded-for']?.split(',')[0] || 
+    req.connection?.remoteAddress || 
+    'unknown';
+}
+
+/* ============================================== */
+/* ===== HEALTH CHECK ===== */
+/* ============================================== */
+app.get('/', (req, res) => {
   res.json({
     name: 'AIMLOCK KEY SERVER',
-    version: '1.0.0',
+    version: '2.0.0',
     status: 'online',
     time: new Date().toISOString()
   });
 });
 
-app.post('/api/verify', function(req, res) {
-  const key = req.body.key;
-  const deviceId = req.body.deviceId;
-  const ip = req.ip || 'unknown';
+// ⭐ Endpoint /api/ping — để UptimeRobot wake server
+app.get('/api/ping', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    time: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
 
-  if (!key || typeof key !== 'string') {
-    return res.json({ valid: false, error: 'KEY KHONG HOP LE' });
+/* ============================================== */
+/* ===== VERIFY KEY — LOCK DEVICE ===== */
+/* ============================================== */
+app.post('/api/verify', (req, res) => {
+  const { key, deviceId } = req.body;
+  const ip = getClientIp(req);
+
+  // ⭐ Validate input
+  if (!isValidKeyFormat(key)) {
+    return res.json({ valid: false, error: 'KEY KHÔNG HỢP LỆ' });
+  }
+
+  if (!deviceId || typeof deviceId !== 'string' || deviceId.length < 5) {
+    return res.json({ valid: false, error: 'THIẾU DEVICE ID' });
   }
 
   const keyCode = key.trim().toUpperCase();
 
   try {
-    const record = queryOne('SELECT * FROM keys WHERE key_code = ?', [keyCode]);
+    const record = db.prepare('SELECT * FROM keys WHERE key_code = ?').get(keyCode);
 
     if (!record) {
       logAction(keyCode, 'INVALID_KEY', deviceId, ip);
-      return res.json({ valid: false, error: 'KEY KHONG TON TAI' });
+      return res.json({ valid: false, error: 'KEY KHÔNG TỒN TẠI' });
     }
 
     if (record.status === 'banned') {
       logAction(keyCode, 'BANNED_KEY', deviceId, ip);
-      return res.json({ valid: false, error: 'KEY DA BI KHOA' });
+      return res.json({ valid: false, error: 'KEY ĐÃ BỊ KHÓA' });
     }
 
     if (record.status === 'expired') {
       logAction(keyCode, 'EXPIRED_KEY', deviceId, ip);
-      return res.json({ valid: false, error: 'KEY DA HET HAN' });
+      return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
     }
 
+    // Kiểm tra hết hạn tự động
     if (record.expires_at) {
       const expiresAt = new Date(record.expires_at);
       if (expiresAt < new Date()) {
-        execute('UPDATE keys SET status = ? WHERE key_code = ?', ['expired', keyCode]);
+        db.prepare('UPDATE keys SET status = ? WHERE key_code = ?').run('expired', keyCode);
         logAction(keyCode, 'KEY_EXPIRED', deviceId, ip);
-        return res.json({ valid: false, error: 'KEY DA HET HAN' });
+        return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
       }
     }
 
+    /* ===== KÍCH HOẠT LẦN ĐẦU ===== */
     if (record.status === 'unused' || !record.activated_at) {
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + (record.duration_days || 30));
 
-      execute('UPDATE keys SET status = ?, activated_at = CURRENT_TIMESTAMP, expires_at = ?, used_by = ?, device_id = ? WHERE key_code = ?',
-        ['active', expiresAt.toISOString(), deviceId || null, deviceId || null, keyCode]);
+      db.prepare(`
+        UPDATE keys SET 
+          status = 'active', 
+          activated_at = CURRENT_TIMESTAMP,
+          expires_at = ?, 
+          used_by = ?, 
+          device_id = ?, 
+          device_locked_at = CURRENT_TIMESTAMP,
+          last_seen = CURRENT_TIMESTAMP
+        WHERE key_code = ?
+      `).run(expiresAt.toISOString(), deviceId, deviceId, keyCode);
 
       logAction(keyCode, 'KEY_ACTIVATED', deviceId, ip);
+      console.log(`[ACTIVATE] ${keyCode} → ${deviceId}`);
 
       return res.json({
         valid: true,
-        message: 'KICH HOAT THANH CONG',
+        message: 'KÍCH HOẠT THÀNH CÔNG',
         key: keyCode,
         expiresAt: expiresAt.toISOString(),
-        durationDays: record.duration_days
+        durationDays: record.duration_days,
+        deviceId: deviceId,
+        isFirstActivation: true
       });
     }
 
-    if (record.device_id && deviceId && record.device_id !== deviceId) {
+    /* ===== ⭐ CHECK DEVICE — NGHIÊM NGẶT ===== */
+    // Nếu key đã lock device mà device khác → TỪ CHỐI
+    if (record.device_id && record.device_id !== deviceId) {
       logAction(keyCode, 'DEVICE_MISMATCH', deviceId, ip);
-      return res.json({ valid: false, error: 'KEY DA DUNG TREN THIET BI KHAC' });
+      console.log(`[REJECT] ${keyCode} locked to ${record.device_id}, got ${deviceId}`);
+      
+      return res.json({ 
+        valid: false, 
+        error: 'KEY ĐÃ DÙNG TRÊN THIẾT BỊ KHÁC',
+        currentDevice: deviceId,
+        lockedDevice: record.device_id.substring(0, 8) + '...',
+        hint: 'Liên hệ admin để reset thiết bị'
+      });
     }
+
+    // ⭐ Update last_seen
+    db.prepare('UPDATE keys SET last_seen = CURRENT_TIMESTAMP WHERE key_code = ?').run(keyCode);
 
     logAction(keyCode, 'VERIFY_OK', deviceId, ip);
     return res.json({
       valid: true,
-      message: 'XAC THUC THANH CONG',
+      message: 'XÁC THỰC THÀNH CÔNG',
       key: keyCode,
-      expiresAt: record.expires_at
+      expiresAt: record.expires_at,
+      deviceId: record.device_id
     });
 
   } catch(e) {
     console.error('Verify error:', e);
-    res.json({ valid: false, error: 'LOI SERVER' });
+    res.json({ valid: false, error: 'LỖI SERVER' });
   }
 });
 
-app.post('/api/heartbeat', function(req, res) {
-  const key = req.body.key;
-  const deviceId = req.body.deviceId;
-  if (!key) return res.json({ valid: false });
+/* ============================================== */
+/* ===== HEARTBEAT — KIỂM TRA ĐỊNH KỲ ===== */
+/* ============================================== */
+app.post('/api/heartbeat', (req, res) => {
+  const { key, deviceId } = req.body;
+  const ip = getClientIp(req);
+
+  if (!key || !deviceId) {
+    return res.json({ valid: false, error: 'THIẾU DỮ LIỆU' });
+  }
 
   try {
-    const record = queryOne('SELECT * FROM keys WHERE key_code = ?', [key.toUpperCase()]);
-    if (!record || record.status !== 'active') return res.json({ valid: false });
+    const keyCode = key.toUpperCase();
+    const record = db.prepare('SELECT * FROM keys WHERE key_code = ?').get(keyCode);
 
+    if (!record) {
+      return res.json({ valid: false, error: 'KEY KHÔNG TỒN TẠI' });
+    }
+
+    if (record.status === 'banned') {
+      return res.json({ valid: false, error: 'KEY ĐÃ BỊ KHÓA' });
+    }
+
+    if (record.status !== 'active') {
+      return res.json({ valid: false, error: 'KEY KHÔNG HOẠT ĐỘNG' });
+    }
+
+    // ⭐ Check hết hạn — TỰ ĐỘNG UPDATE DB
     if (record.expires_at && new Date(record.expires_at) < new Date()) {
-      execute('UPDATE keys SET status = ? WHERE key_code = ?', ['expired', record.key_code]);
-      return res.json({ valid: false, error: 'KEY DA HET HAN' });
+      db.prepare('UPDATE keys SET status = ? WHERE key_code = ?').run('expired', keyCode);
+      logAction(keyCode, 'HEARTBEAT_EXPIRED', deviceId, ip);
+      console.log(`[EXPIRED] ${keyCode} — auto marked expired`);
+      return res.json({ 
+        valid: false, 
+        error: 'KEY ĐÃ HẾT HẠN',
+        expiresAt: record.expires_at
+      });
     }
 
-    if (record.device_id && deviceId && record.device_id !== deviceId) {
-      return res.json({ valid: false, error: 'DEVICE KHONG KHOP' });
+    // ⭐ Check device
+    if (record.device_id && record.device_id !== deviceId) {
+      logAction(keyCode, 'HEARTBEAT_DEVICE_MISMATCH', deviceId, ip);
+      return res.json({ 
+        valid: false, 
+        error: 'DEVICE KHÔNG KHỚP'
+      });
     }
 
-    return res.json({ valid: true, expiresAt: record.expires_at });
+    // Update last_seen
+    db.prepare('UPDATE keys SET last_seen = CURRENT_TIMESTAMP WHERE key_code = ?').run(keyCode);
+
+    // Tính thời gian còn lại
+    const timeLeftMs = new Date(record.expires_at) - new Date();
+    const timeLeftSeconds = Math.floor(timeLeftMs / 1000);
+    const timeLeftDays = Math.floor(timeLeftSeconds / 86400);
+
+    return res.json({ 
+      valid: true, 
+      expiresAt: record.expires_at,
+      timeLeftSeconds: timeLeftSeconds,
+      timeLeftDays: timeLeftDays
+    });
+
   } catch(e) {
-    return res.json({ valid: false });
+    console.error('Heartbeat error:', e);
+    return res.json({ valid: false, error: 'LỖI SERVER' });
   }
 });
 
-app.post('/api/admin/create', function(req, res) {
-  const token = req.body.token;
-  const count = req.body.count;
-  const duration_days = req.body.duration_days;
-  const prefix = req.body.prefix;
-  const note = req.body.note;
+/* ============================================== */
+/* ===== ADMIN ENDPOINTS ===== */
+/* ============================================== */
 
-  if (token !== ADMIN_TOKEN) return res.status(403).json({ error: 'UNAUTHORIZED' });
+// Middleware check admin token
+function requireAdmin(req, res, next) {
+  const { token } = req.body;
+  if (token !== ADMIN_TOKEN) {
+    return res.status(403).json({ error: 'UNAUTHORIZED' });
+  }
+  next();
+}
 
+// Tạo key
+app.post('/api/admin/create', requireAdmin, (req, res) => {
+  const { count, duration_days, prefix, note } = req.body;
   const numKeys = Math.min(parseInt(count) || 1, 100);
   const duration = parseInt(duration_days) || 30;
   const keyPrefix = prefix || 'AIM';
   const createdKeys = [];
 
   try {
+    const insert = db.prepare('INSERT INTO keys (key_code, duration_days, note) VALUES (?, ?, ?)');
+
     for (let i = 0; i < numKeys; i++) {
       let newKey = generateKey(keyPrefix);
       let attempts = 0;
-      while (queryOne('SELECT id FROM keys WHERE key_code = ?', [newKey]) && attempts < 10) {
+      while (db.prepare('SELECT id FROM keys WHERE key_code = ?').get(newKey) && attempts < 10) {
         newKey = generateKey(keyPrefix);
         attempts++;
       }
-      execute('INSERT INTO keys (key_code, duration_days, note) VALUES (?, ?, ?)',
-        [newKey, duration, note || null]);
+      insert.run(newKey, duration, note || null);
       createdKeys.push(newKey);
     }
 
     res.json({ success: true, count: createdKeys.length, duration_days: duration, keys: createdKeys });
   } catch(e) {
     console.error('Create error:', e);
-    res.status(500).json({ error: 'LOI TAO KEY' });
+    res.status(500).json({ error: 'LỖI TẠO KEY' });
   }
 });
 
-app.post('/api/admin/list', function(req, res) {
-  const token = req.body.token;
-  const status = req.body.status;
-  const limit = req.body.limit;
-
-  if (token !== ADMIN_TOKEN) return res.status(403).json({ error: 'UNAUTHORIZED' });
+// List keys
+app.post('/api/admin/list', requireAdmin, (req, res) => {
+  const { status, limit } = req.body;
 
   try {
     let query = 'SELECT * FROM keys';
@@ -298,91 +375,155 @@ app.post('/api/admin/list', function(req, res) {
     query += ' ORDER BY created_at DESC LIMIT ?';
     params.push(Math.min(parseInt(limit) || 100, 500));
 
-    const rows = queryAll(query, params);
+    const rows = db.prepare(query).all(...params);
     res.json({ success: true, count: rows.length, keys: rows });
   } catch(e) {
-    res.status(500).json({ error: 'LOI' });
+    res.status(500).json({ error: 'LỖI' });
   }
 });
 
-app.post('/api/admin/set-status', function(req, res) {
-  const token = req.body.token;
-  const key = req.body.key;
-  const status = req.body.status;
+// Set status
+app.post('/api/admin/set-status', requireAdmin, (req, res) => {
+  const { key, status } = req.body;
 
-  if (token !== ADMIN_TOKEN) return res.status(403).json({ error: 'UNAUTHORIZED' });
-
-  if (['active', 'banned', 'expired', 'unused'].indexOf(status) === -1) {
-    return res.json({ error: 'STATUS KHONG HOP LE' });
+  if (!['active', 'banned', 'expired', 'unused'].includes(status)) {
+    return res.json({ error: 'STATUS KHÔNG HỢP LỆ' });
   }
 
   try {
-    execute('UPDATE keys SET status = ? WHERE key_code = ?', [status, key.toUpperCase()]);
-    res.json({ success: true, key: key.toUpperCase(), status: status });
+    const result = db.prepare('UPDATE keys SET status = ? WHERE key_code = ?')
+      .run(status, key.toUpperCase());
+    res.json({ success: result.changes > 0, key: key.toUpperCase(), status });
   } catch(e) {
-    res.status(500).json({ error: 'LOI' });
+    res.status(500).json({ error: 'LỖI' });
   }
 });
 
-app.post('/api/admin/delete', function(req, res) {
-  const token = req.body.token;
-  const key = req.body.key;
-
-  if (token !== ADMIN_TOKEN) return res.status(403).json({ error: 'UNAUTHORIZED' });
+// Delete key
+app.post('/api/admin/delete', requireAdmin, (req, res) => {
+  const { key } = req.body;
 
   try {
-    execute('DELETE FROM keys WHERE key_code = ?', [key.toUpperCase()]);
-    res.json({ success: true });
+    const result = db.prepare('DELETE FROM keys WHERE key_code = ?').run(key.toUpperCase());
+    res.json({ success: result.changes > 0 });
   } catch(e) {
-    res.status(500).json({ error: 'LOI' });
+    res.status(500).json({ error: 'LỖI' });
   }
 });
 
-app.post('/api/admin/reset-device', function(req, res) {
-  const token = req.body.token;
-  const key = req.body.key;
-
-  if (token !== ADMIN_TOKEN) return res.status(403).json({ error: 'UNAUTHORIZED' });
+// ⭐ Reset device — cho user đổi máy
+app.post('/api/admin/reset-device', requireAdmin, (req, res) => {
+  const { key } = req.body;
 
   try {
-    execute('UPDATE keys SET device_id = NULL WHERE key_code = ?', [key.toUpperCase()]);
-    res.json({ success: true, message: 'DA RESET THIET BI' });
-  } catch(e) {
-    res.status(500).json({ error: 'LOI' });
-  }
-});
+    const result = db.prepare(`
+      UPDATE keys SET 
+        device_id = NULL, 
+        device_locked_at = NULL,
+        last_seen = NULL
+      WHERE key_code = ?
+    `).run(key.toUpperCase());
 
-app.post('/api/admin/stats', function(req, res) {
-  const token = req.body.token;
-  if (token !== ADMIN_TOKEN) return res.status(403).json({ error: 'UNAUTHORIZED' });
+    if (result.changes > 0) {
+      logAction(key.toUpperCase(), 'ADMIN_RESET_DEVICE', null, getClientIp(req));
+      console.log(`[ADMIN] Reset device for ${key.toUpperCase()}`);
+    }
 
-  try {
-    const total = queryOne('SELECT COUNT(*) as c FROM keys');
-    const active = queryOne("SELECT COUNT(*) as c FROM keys WHERE status = 'active'");
-    const banned = queryOne("SELECT COUNT(*) as c FROM keys WHERE status = 'banned'");
-    const expired = queryOne("SELECT COUNT(*) as c FROM keys WHERE status = 'expired'");
-    const unused = queryOne("SELECT COUNT(*) as c FROM keys WHERE status = 'unused'");
-
-    res.json({
-      success: true,
-      stats: {
-        total: total ? total.c : 0,
-        active: active ? active.c : 0,
-        banned: banned ? banned.c : 0,
-        expired: expired ? expired.c : 0,
-        unused: unused ? unused.c : 0
-      }
+    res.json({ 
+      success: result.changes > 0, 
+      message: result.changes > 0 ? 'ĐÃ RESET THIẾT BỊ' : 'KHÔNG TÌM THẤY KEY'
     });
   } catch(e) {
-    res.status(500).json({ error: 'LOI' });
+    res.status(500).json({ error: 'LỖI' });
   }
 });
 
-initDB().then(function() {
-  app.listen(PORT, function() {
-    console.log('AIMLOCK KEY SERVER running on port ' + PORT);
-  });
-}).catch(function(e) {
-  console.error('Init DB failed:', e);
-  process.exit(1);
+// ⭐ Reset expiry — gia hạn key
+app.post('/api/admin/extend', requireAdmin, (req, res) => {
+  const { key, days } = req.body;
+  const extendDays = parseInt(days) || 30;
+
+  try {
+    const record = db.prepare('SELECT * FROM keys WHERE key_code = ?').get(key.toUpperCase());
+    if (!record) return res.status(404).json({ error: 'KEY NOT FOUND' });
+
+    let newExpiry;
+    if (record.expires_at && new Date(record.expires_at) > new Date()) {
+      // Còn hạn → cộng thêm
+      newExpiry = new Date(record.expires_at);
+      newExpiry.setDate(newExpiry.getDate() + extendDays);
+    } else {
+      // Hết hạn → bắt đầu từ hôm nay
+      newExpiry = new Date();
+      newExpiry.setDate(newExpiry.getDate() + extendDays);
+    }
+
+    db.prepare(`
+      UPDATE keys SET 
+        expires_at = ?, 
+        status = 'active'
+      WHERE key_code = ?
+    `).run(newExpiry.toISOString(), key.toUpperCase());
+
+    logAction(key.toUpperCase(), 'ADMIN_EXTEND', null, getClientIp(req));
+
+    res.json({ 
+      success: true, 
+      message: `Đã gia hạn ${extendDays} ngày`,
+      newExpiry: newExpiry.toISOString()
+    });
+  } catch(e) {
+    res.status(500).json({ error: 'LỖI' });
+  }
+});
+
+// Stats
+app.post('/api/admin/stats', requireAdmin, (req, res) => {
+  try {
+    const total = db.prepare('SELECT COUNT(*) as c FROM keys').get().c;
+    const active = db.prepare("SELECT COUNT(*) as c FROM keys WHERE status = 'active'").get().c;
+    const banned = db.prepare("SELECT COUNT(*) as c FROM keys WHERE status = 'banned'").get().c;
+    const expired = db.prepare("SELECT COUNT(*) as c FROM keys WHERE status = 'expired'").get().c;
+    const unused = db.prepare("SELECT COUNT(*) as c FROM keys WHERE status = 'unused'").get().c;
+
+    // Đếm key active trong 5 phút gần đây (đang online)
+    const online = db.prepare(`
+      SELECT COUNT(*) as c FROM keys 
+      WHERE status = 'active' 
+      AND last_seen > datetime('now', '-5 minutes')
+    `).get().c;
+
+    res.json({ 
+      success: true, 
+      stats: { total, active, banned, expired, unused, online }
+    });
+  } catch(e) {
+    res.status(500).json({ error: 'LỖI' });
+  }
+});
+
+/* ============================================== */
+/* ===== 404 HANDLER ===== */
+/* ============================================== */
+app.use((req, res) => {
+  res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI' });
+});
+
+/* ============================================== */
+/* ===== START ===== */
+/* ============================================== */
+app.listen(PORT, () => {
+  console.log('==========================================');
+  console.log(`🚀 AIMLOCK KEY SERVER v2.0`);
+  console.log(`📡 Port: ${PORT}`);
+  console.log(`💾 DB: ${DB_PATH}`);
+  console.log(`🔐 Admin token: ${ADMIN_TOKEN.substring(0, 8)}...`);
+  console.log('==========================================');
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('Đang tắt server...');
+  db.close();
+  process.exit(0);
 });
