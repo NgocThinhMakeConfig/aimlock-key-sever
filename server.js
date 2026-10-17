@@ -1,8 +1,10 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v3.0 — FINAL (JSON DB - FIX CORS) */
+/* NOVA KEY SERVER v3.2 — FINAL (JSON DB)                       */
+/* Tự động xóa key hết hạn | CORS Fix | Hỗ trợ Header Admin     */
 /* ============================================================ */
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 
 const app = express();
 
@@ -11,9 +13,12 @@ app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
-const DB_PATH = process.env.NODE_ENV === 'production' ? '/tmp/keys.json' : './keys.json';
 
-/* ⭐ FIX 2: CORS THỦ CÔNG — KHÔNG DÙNG PACKAGE */
+// ⚠️ QUAN TRỌNG: Không dùng /tmp vì trên Render sẽ bị xóa khi restart
+// Lưu tại thư mục gốc của project.
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'keys.json');
+
+/* ⭐ FIX 2: CORS TỰ ĐỘNG — Hỗ trợ cả Header tùy chỉnh */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
@@ -35,7 +40,9 @@ function loadDB() {
     if (fs.existsSync(DB_PATH)) {
       return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
     }
-  } catch(e) {}
+  } catch(e) { 
+    console.error('Load DB error:', e.message); 
+  }
   return { keys: {}, logs: [] };
 }
 
@@ -48,7 +55,7 @@ function saveDB(data) {
 let db = loadDB();
 
 /* ===== HELPERS ===== */
-function generateKey(prefix = 'AIM') {
+function generateKey(prefix = 'NOVA') {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let parts = [];
   for (let p = 0; p < 4; p++) {
@@ -63,7 +70,7 @@ function generateKey(prefix = 'AIM') {
 
 function isValidKeyFormat(key) {
   if (!key || typeof key !== 'string') return false;
-  if (key.length < 10 || key.length > 30) return false;
+  if (key.length < 10 || key.length > 40) return false;
   return /^[A-Z0-9\-]+$/i.test(key);
 }
 
@@ -77,15 +84,11 @@ function logAction(keyCode, action, deviceId, ip) {
   saveDB(db);
 }
 
-function getClientIp(req) {
-  return req.ip || 'unknown';
-}
-
 /* ===== HEALTH CHECK ===== */
 app.get('/', (req, res) => {
   res.json({
-    name: 'AIMLOCK KEY SERVER',
-    version: '3.0.0',
+    name: 'NOVA KEY SERVER',
+    version: '3.2.0',
     status: 'online',
     time: new Date().toISOString()
   });
@@ -98,7 +101,7 @@ app.get('/api/ping', (req, res) => {
 /* ===== VERIFY KEY ===== */
 app.post('/api/verify', (req, res) => {
   const { key, deviceId } = req.body;
-  const ip = getClientIp(req);
+  const ip = req.ip || 'unknown';
 
   if (!isValidKeyFormat(key)) {
     return res.json({ valid: false, error: 'KEY KHÔNG HỢP LỆ' });
@@ -111,7 +114,7 @@ app.post('/api/verify', (req, res) => {
   const keyCode = key.trim().toUpperCase();
 
   try {
-    db = loadDB();
+    db = loadDB(); // Đảm bảo dữ liệu mới nhất
     const record = db.keys[keyCode];
 
     if (!record) {
@@ -124,6 +127,7 @@ app.post('/api/verify', (req, res) => {
       return res.json({ valid: false, error: 'KEY ĐÃ BỊ KHÓA' });
     }
 
+    // Kiểm tra hạn
     if (record.expires_at && new Date(record.expires_at) < new Date()) {
       record.status = 'expired';
       saveDB(db);
@@ -156,7 +160,7 @@ app.post('/api/verify', (req, res) => {
       });
     }
 
-    // Check device
+    // Check Device (Khóa 1 máy)
     if (record.device_id && record.device_id !== deviceId) {
       logAction(keyCode, 'DEVICE_MISMATCH', deviceId, ip);
       return res.json({
@@ -218,7 +222,8 @@ app.post('/api/heartbeat', (req, res) => {
 
 /* ===== ADMIN ===== */
 function requireAdmin(req, res, next) {
-  const { token } = req.body;
+  // ⭐ FIX 3: Hỗ trợ cả Header x-admin-token (chuẩn REST API) và body token
+  const token = req.headers['x-admin-token'] || req.body.token;
   if (token !== ADMIN_TOKEN) {
     return res.status(403).json({ error: 'UNAUTHORIZED' });
   }
@@ -230,7 +235,7 @@ app.post('/api/admin/create', requireAdmin, (req, res) => {
   const { count, duration_days, prefix, note } = req.body;
   const numKeys = Math.min(parseInt(count) || 1, 100);
   const duration = parseInt(duration_days) || 30;
-  const keyPrefix = prefix || 'AIM';
+  const keyPrefix = prefix || 'NOVA';
 
   try {
     db = loadDB();
@@ -281,7 +286,7 @@ app.post('/api/admin/list', requireAdmin, (req, res) => {
   }
 });
 
-// Set status
+// Set status (Ban/Unban)
 app.post('/api/admin/set-status', requireAdmin, (req, res) => {
   const { key, status } = req.body;
   try {
@@ -309,7 +314,7 @@ app.post('/api/admin/delete', requireAdmin, (req, res) => {
   }
 });
 
-// Reset device
+// Reset device (Để đổi máy)
 app.post('/api/admin/reset-device', requireAdmin, (req, res) => {
   const { key } = req.body;
   try {
@@ -378,14 +383,42 @@ app.use((req, res) => {
   res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI' });
 });
 
+/* ⭐ FIX 4: TỰ ĐỘNG DỌN KEY HẾT HẠN MỖI 10 PHÚT */
+async function autoCleanExpiredKeys() {
+  try {
+    db = loadDB();
+    let deletedCount = 0;
+    const now = new Date();
+
+    for (const [keyCode, record] of Object.entries(db.keys)) {
+      // Chỉ xóa khi key đã hết hạn quá 1 ngày
+      if (record.expires_at && new Date(record.expires_at) < new Date(now.getTime() - 86400000)) {
+        delete db.keys[keyCode];
+        deletedCount++;
+      }
+    }
+
+    if (deletedCount > 0) {
+      saveDB(db);
+      console.log(`🧹 Auto-clean: Đã xóa ${deletedCount} key hết hạn (${new Date().toLocaleString('vi-VN')})`);
+    }
+  } catch (e) {
+    console.error('Auto-clean error:', e.message);
+  }
+}
+
+setInterval(autoCleanExpiredKeys, 10 * 60 * 1000);
+setTimeout(autoCleanExpiredKeys, 10 * 1000);
+
 /* ===== START ===== */
 app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v3.0');
+  console.log('🚀 NOVA KEY SERVER v3.2');
   console.log('📡 Port:', PORT);
   console.log('💾 DB:', DB_PATH);
   console.log('✅ CORS: manual headers');
   console.log('✅ Trust proxy: enabled');
+  console.log('✅ Auto-clean: MỖI 10 PHÚT');
   console.log('==========================================');
 });
 
