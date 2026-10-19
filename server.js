@@ -1,6 +1,6 @@
 /* ============================================================ */
-/* NOVA KEY SERVER v3.2 — FINAL (JSON DB)                       */
-/* Tự động xóa key hết hạn | CORS Fix | Hỗ trợ Header Admin     */
+/* NOVA KEY SERVER v3.3 — FIXED (No Auto-Delete)                */
+/* Đã tắt tính năng tự động xóa key để tránh mất key khi in     */
 /* ============================================================ */
 const express = require('express');
 const fs = require('fs');
@@ -8,17 +8,14 @@ const path = require('path');
 
 const app = express();
 
-/* ⭐ FIX 1: TRUST PROXY — BẮT BUỘC CHO RENDER */
 app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 
-// ⚠️ QUAN TRỌNG: Không dùng /tmp vì trên Render sẽ bị xóa khi restart
-// Lưu tại thư mục gốc của project.
+// Lưu file JSON ở thư mục gốc (không dùng /tmp)
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'keys.json');
 
-/* ⭐ FIX 2: CORS TỰ ĐỘNG — Hỗ trợ cả Header tùy chỉnh */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
@@ -88,7 +85,7 @@ function logAction(keyCode, action, deviceId, ip) {
 app.get('/', (req, res) => {
   res.json({
     name: 'NOVA KEY SERVER',
-    version: '3.2.0',
+    version: '3.3.0',
     status: 'online',
     time: new Date().toISOString()
   });
@@ -114,7 +111,7 @@ app.post('/api/verify', (req, res) => {
   const keyCode = key.trim().toUpperCase();
 
   try {
-    db = loadDB(); // Đảm bảo dữ liệu mới nhất
+    db = loadDB(); 
     const record = db.keys[keyCode];
 
     if (!record) {
@@ -127,7 +124,6 @@ app.post('/api/verify', (req, res) => {
       return res.json({ valid: false, error: 'KEY ĐÃ BỊ KHÓA' });
     }
 
-    // Kiểm tra hạn
     if (record.expires_at && new Date(record.expires_at) < new Date()) {
       record.status = 'expired';
       saveDB(db);
@@ -222,7 +218,6 @@ app.post('/api/heartbeat', (req, res) => {
 
 /* ===== ADMIN ===== */
 function requireAdmin(req, res, next) {
-  // ⭐ FIX 3: Hỗ trợ cả Header x-admin-token (chuẩn REST API) và body token
   const token = req.headers['x-admin-token'] || req.body.token;
   if (token !== ADMIN_TOKEN) {
     return res.status(403).json({ error: 'UNAUTHORIZED' });
@@ -383,42 +378,15 @@ app.use((req, res) => {
   res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI' });
 });
 
-/* ⭐ FIX 4: TỰ ĐỘNG DỌN KEY HẾT HẠN MỖI 10 PHÚT */
-async function autoCleanExpiredKeys() {
-  try {
-    db = loadDB();
-    let deletedCount = 0;
-    const now = new Date();
-
-    for (const [keyCode, record] of Object.entries(db.keys)) {
-      // Chỉ xóa khi key đã hết hạn quá 1 ngày
-      if (record.expires_at && new Date(record.expires_at) < new Date(now.getTime() - 86400000)) {
-        delete db.keys[keyCode];
-        deletedCount++;
-      }
-    }
-
-    if (deletedCount > 0) {
-      saveDB(db);
-      console.log(`🧹 Auto-clean: Đã xóa ${deletedCount} key hết hạn (${new Date().toLocaleString('vi-VN')})`);
-    }
-  } catch (e) {
-    console.error('Auto-clean error:', e.message);
-  }
-}
-
-setInterval(autoCleanExpiredKeys, 10 * 60 * 1000);
-setTimeout(autoCleanExpiredKeys, 10 * 1000);
-
 /* ===== START ===== */
 app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 NOVA KEY SERVER v3.2');
+  console.log('🚀 NOVA KEY SERVER v3.3');
   console.log('📡 Port:', PORT);
   console.log('💾 DB:', DB_PATH);
   console.log('✅ CORS: manual headers');
   console.log('✅ Trust proxy: enabled');
-  console.log('✅ Auto-clean: MỖI 10 PHÚT');
+  console.log('⛔ Auto-clean: ĐÃ TẮT (Để tránh mất key)');
   console.log('==========================================');
 });
 
