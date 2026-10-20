@@ -1,5 +1,6 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v4.1 — POSTGRESQL (Bảng riêng aimlock_keys)*/
+/* AIMLOCK KEY SERVER v4.2 — POSTGRESQL (Bản Hoàn Chỉnh Cuối)   */
+/* Lưu trữ vĩnh viễn, bảng riêng aimlock_keys                   */
 /* ============================================================ */
 const express = require('express');
 const { Pool } = require('pg'); 
@@ -10,10 +11,10 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 
-// Kết nối tới Database có sẵn
+// Kết nối Database (Bắt buộc phải bật SSL cho Render)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
 // Tự động tạo bảng aimlock_keys nếu chưa có
@@ -45,9 +46,11 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
   res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Expose-Headers', '*');
   if (req.method === 'OPTIONS') return res.status(200).end();
   next();
 });
+
 app.use(express.json({ limit: '10kb' }));
 
 /* ===== HELPERS ===== */
@@ -110,6 +113,31 @@ app.post('/api/verify', async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ valid: false, error: 'LỖI SERVER' });
+  }
+});
+
+/* ===== API HEARTBEAT ===== */
+app.post('/api/heartbeat', async (req, res) => {
+  const { key, deviceId } = req.body;
+  if (!key || !deviceId) return res.json({ valid: false });
+
+  try {
+    const keyCode = key.toUpperCase();
+    const { rows } = await pool.query('SELECT * FROM aimlock_keys WHERE key_code = $1', [keyCode]);
+    const record = rows[0];
+
+    if (!record || record.status !== 'active') return res.json({ valid: false, error: 'KEY KHÔNG HOẠT ĐỘNG' });
+    if (record.expires_at && new Date(record.expires_at) < new Date()) {
+      await pool.query('UPDATE aimlock_keys SET status = $1 WHERE id = $2', ['expired', record.id]);
+      return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
+    }
+    if (record.device_id && record.device_id !== deviceId) return res.json({ valid: false, error: 'DEVICE KHÔNG KHỚP' });
+
+    await pool.query('UPDATE aimlock_keys SET last_seen = NOW() WHERE id = $1', [record.id]);
+    return res.json({ valid: true, expiresAt: record.expires_at });
+
+  } catch (e) {
+    return res.json({ valid: false, error: 'LỖI SERVER' });
   }
 });
 
@@ -197,6 +225,11 @@ app.post('/api/admin/reset-device', requireAdmin, async (req, res) => {
 
 /* ===== START ===== */
 app.listen(PORT, () => {
-  console.log('🚀 AIMLOCK KEY SERVER v4.1 (PostgreSQL)');
+  console.log('==========================================');
+  console.log('🚀 AIMLOCK KEY SERVER v4.2 (PostgreSQL)');
   console.log('📡 Port:', PORT);
+  console.log('✅ Lưu trữ vĩnh viễn, không bao giờ mất key');
+  console.log('==========================================');
 });
+
+process.on('SIGTERM', () => process.exit(0));
