@@ -1,5 +1,5 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v8.0 - SPLIT DB CONFIG                    */
+/* AIMLOCK KEY SERVER v8.1 - FINAL OPTIMIZED                    */
 /* ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
@@ -11,8 +11,14 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123'; 
+
+// 🟢 SỬA LỖI TẠI ĐÂY: Token mặc định phải dài >= 16 ký tự
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123'; 
 const ADMIN_READY = ADMIN_TOKEN.length >= 16;
+
+if (!ADMIN_READY) {
+  console.error('❌ CẢNH BÁO: ADMIN_TOKEN trên Render đang ngắn hơn 16 ký tự. API Admin sẽ bị khóa!');
+}
 
 /* ===== DATABASE (Đọc từ 5 biến riêng biệt) ===== */
 const dbConfig = {
@@ -21,7 +27,7 @@ const dbConfig = {
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  ssl: { rejectUnauthorized: false }, // Luôn bật SSL cho Render
+  ssl: { rejectUnauthorized: false }, // Bắt buộc cho Render PostgreSQL
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
@@ -36,6 +42,7 @@ async function initDB() {
   console.log('⏳ Đang kết nối tới Database...');
   await pool.query('SELECT 1');
   console.log('✅ Kết nối Database thành công!');
+  
   await pool.query(`
     CREATE TABLE IF NOT EXISTS keys (
       key_code TEXT PRIMARY KEY,
@@ -67,10 +74,9 @@ async function connectWithRetry() {
     }
   }
 }
-
 connectWithRetry();
 
-/* ===== CÁC PHẦN CÒN LẠI GIỮ NGUYÊN (CORS, RATE LIMIT, API...) ===== */
+/* ===== MIDDLEWARE ===== */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -80,6 +86,7 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '10kb' }));
 
+/* Rate Limit */
 function rateLimit({ windowMs, max }) {
   const hits = new Map();
   setInterval(() => {
@@ -99,6 +106,7 @@ const verifyLimiter = rateLimit({ windowMs: 60000, max: 20 });
 const heartbeatLimiter = rateLimit({ windowMs: 60000, max: 60 });
 const adminLimiter = rateLimit({ windowMs: 60000, max: 60 });
 
+/* ===== HELPERS ===== */
 const KEY_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function generateKey(prefix = 'AIM') {
   const parts = [];
@@ -113,12 +121,13 @@ function normalizeKey(key) { return typeof key === 'string' ? key.trim().toUpper
 function isValidKeyFormat(key) { return /^[A-Z0-9-]{10,40}$/.test(key); }
 function isValidDeviceId(id) { return typeof id === 'string' && id.length >= 5 && id.length <= 200; }
 
+/* Chặn API nếu DB chưa sẵn sàng */
 app.use('/api', (req, res, next) => {
   if (!dbReady) return res.status(503).json({ error: 'DATABASE ĐANG KHỞI ĐỘNG, THỬ LẠI SAU' });
   next();
 });
 
-app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '8.0.0', status: 'online', db: dbReady }));
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '8.1.0', status: 'online', db: dbReady }));
 
 /* ===== VERIFY ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
@@ -273,11 +282,12 @@ app.use((err, req, res, next) => {
 
 const server = app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v8.0');
+  console.log('🚀 AIMLOCK KEY SERVER v8.1');
   console.log('📡 Port:', PORT);
   console.log('==========================================');
 });
 
+// Chỉ cập nhật trạng thái hết hạn, KHÔNG XÓA KEY
 setInterval(async () => {
   if (!dbReady) return;
   try {
