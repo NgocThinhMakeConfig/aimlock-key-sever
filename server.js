@@ -11,7 +11,7 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123'; 
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123'; 
 const ADMIN_READY = ADMIN_TOKEN.length >= 16;
 
 /* ===== DATABASE (Đọc từ 5 biến riêng biệt) ===== */
