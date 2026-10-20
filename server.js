@@ -1,6 +1,6 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v4.5 - FINAL                              */
-/* Đã tắt hoàn toàn Auto-clean. Lưu trữ vĩnh viễn bằng Postgres */
+/* AIMLOCK KEY SERVER v5.0 - FINAL (PostgreSQL + Fix SSL)       */
+/* Tắt auto-clean, kết nối DB vĩnh viễn, fix lỗi self-signed    */
 /* ============================================================ */
 require('dotenv').config();
 const express = require('express');
@@ -13,10 +13,12 @@ app.disable('x-powered-by');
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 
-// Kết nối Database (PostgreSQL trên Render)
+// 🟢 SỬA LỖI SSL TẠI ĐÂY: Luôn luôn bỏ qua kiểm tra chứng chỉ tự ký của Render DB
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Bắt buộc đối với Render PostgreSQL
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
 // Tự động tạo bảng khi server khởi động
@@ -37,7 +39,7 @@ async function initDB() {
     `);
     console.log('✅ Database đã sẵn sàng và kết nối thành công!');
   } catch (err) {
-    console.error('❌ Lỗi khởi tạo DB:', err.message);
+    console.error('❌ Lỗi khởi tạo DB chi tiết:', err.message);
   }
 }
 initDB();
@@ -73,7 +75,7 @@ function isValidKeyFormat(key) {
 
 /* ===== HEALTH CHECK ===== */
 app.get('/', (req, res) => {
-  res.json({ name: 'AIMLOCK KEY SERVER', version: '4.5.0', status: 'online', time: new Date().toISOString() });
+  res.json({ name: 'AIMLOCK KEY SERVER', version: '5.0.0', status: 'online', time: new Date().toISOString() });
 });
 
 /* ===== VERIFY KEY ===== */
@@ -118,7 +120,7 @@ app.post('/api/verify', async (req, res) => {
     return res.json({ valid: true, message: 'XÁC THỰC THÀNH CÔNG', key: keyCode, expiresAt: record.expires_at });
 
   } catch (e) {
-    console.error(e);
+    console.error('Verify error:', e.message);
     res.status(500).json({ valid: false, error: 'LỖI SERVER' });
   }
 });
@@ -293,7 +295,7 @@ app.use((req, res) => res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI
 /* ===== START ===== */
 app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v4.5 (PostgreSQL)');
+  console.log('🚀 AIMLOCK KEY SERVER v5.0 (PostgreSQL)');
   console.log('📡 Port:', PORT);
   console.log('✅ Đã kết nối Database tự động!');
   console.log('✅ Auto-clean: ĐÃ TẮT HOÀN TOÀN');
