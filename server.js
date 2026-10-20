@@ -1,5 +1,5 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v7.3 - FIXED                              */
+/* AIMLOCK KEY SERVER v8.0 - SPLIT DB CONFIG                    */
 /* ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
@@ -11,63 +11,31 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 const PORT = process.env.PORT || 3000;
-
-// 🟢 1. SỬA LỖI ADMIN_TOKEN
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123'; 
 const ADMIN_READY = ADMIN_TOKEN.length >= 16;
 
-if (!process.env.ADMIN_TOKEN) {
-  console.warn('⚠️ Bạn chưa set ADMIN_TOKEN trong Environment. Đang dùng token mặc định (nguy hiểm)!');
-}
-if (!ADMIN_READY) {
-  console.error('❌ ADMIN_TOKEN quá ngắn (<16 ký tự) → API Admin bị khóa!');
-}
-
-/* ===== DATABASE ===== */
-function buildDbConfig() {
-  const raw = process.env.DATABASE_URL;
-  if (!raw) return null;
-  
-  try {
-    const u = new URL(raw);
-    // Xóa tham số SSL để tránh ghi đè cấu hình bên dưới
-    u.searchParams.delete('sslmode');
-    u.searchParams.delete('ssl');
-
-    // Nếu là Internal URL của Render (hostname nội bộ), không cần SSL
-    // Nếu là External URL, bắt buộc dùng SSL
-    const isInternal = u.hostname.endsWith('.internal') || !u.hostname.includes('.');
-    const useSsl = process.env.DB_SSL === 'true' ? true : (process.env.DB_SSL === 'false' ? false : !isInternal);
-
-    return {
-      connectionString: u.toString(),
-      ssl: useSsl ? { rejectUnauthorized: false } : false,
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
-    };
-  } catch (e) {
-    console.error('❌ DATABASE_URL không đúng định dạng:', e.message);
-    return null;
-  }
-}
-
-let dbConfig = buildDbConfig();
-if (!dbConfig) {
-  console.error('⚠️ Chưa có DATABASE_URL hợp lệ → API key sẽ báo LỖI SERVER cho tới khi cấu hình.');
-}
-
-// Fallback pool để tránh crash app nếu thiếu URL
-const pool = new Pool(dbConfig || { connectionString: 'postgresql://invalid:invalid@127.0.0.1:1/invalid' });
-pool.on('error', (err) => console.error('❌ Lỗi pool idle:', err.message));
+/* ===== DATABASE (Đọc từ 5 biến riêng biệt) ===== */
+const dbConfig = {
+  host: process.env.DB_HOST,
+  port: parseInt(process.env.DB_PORT || '5432'),
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  ssl: { rejectUnauthorized: false }, // Luôn bật SSL cho Render
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+};
 
 let dbReady = false;
+const pool = new Pool(dbConfig);
+
+pool.on('error', (err) => console.error('❌ Lỗi pool idle:', err.message));
 
 async function initDB() {
   console.log('⏳ Đang kết nối tới Database...');
   await pool.query('SELECT 1');
   console.log('✅ Kết nối Database thành công!');
-  
   await pool.query(`
     CREATE TABLE IF NOT EXISTS keys (
       key_code TEXT PRIMARY KEY,
@@ -85,24 +53,24 @@ async function initDB() {
 }
 
 async function connectWithRetry() {
-  if (!dbConfig) return;
+  if (!process.env.DB_HOST) {
+    console.error('⚠️ Chưa cấu hình DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT!');
+    return;
+  }
   for (let attempt = 1; !dbReady; attempt++) {
     try {
       await initDB();
       dbReady = true;
     } catch (err) {
       console.error(`❌ Lỗi DB (lần ${attempt}):`, err.message);
-      if (err.code === '28P01') console.error('👉 Gợi ý: Sai mật khẩu User/Password trong DATABASE_URL.');
-      else if (err.code === 'ENOTFOUND') console.error('👉 Gợi ý: Sai Hostname. Nếu cùng Region hãy dùng Internal URL.');
-      else if (err.code === 'ECONNREFUSED') console.error('👉 Gợi ý: Database đang khởi động hoặc sai cổng (5432).');
-      else if (err.message.includes('self-signed certificate')) console.error('👉 Gợi ý: Lỗi SSL. Hãy xóa ?sslmode=require trong DATABASE_URL.');
-      
       await new Promise((r) => setTimeout(r, Math.min(5000 * attempt, 30000)));
     }
   }
 }
 
-/* ===== CORS ===== */
+connectWithRetry();
+
+/* ===== CÁC PHẦN CÒN LẠI GIỮ NGUYÊN (CORS, RATE LIMIT, API...) ===== */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -110,24 +78,18 @@ app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
-
 app.use(express.json({ limit: '10kb' }));
 
-/* ===== RATE LIMIT ===== */
 function rateLimit({ windowMs, max }) {
   const hits = new Map();
   setInterval(() => {
     const now = Date.now();
     for (const [k, v] of hits) if (v.reset < now) hits.delete(k);
   }, windowMs).unref();
-
   return (req, res, next) => {
     const now = Date.now();
     let h = hits.get(req.ip);
-    if (!h || h.reset < now) {
-      h = { count: 0, reset: now + windowMs };
-      hits.set(req.ip, h);
-    }
+    if (!h || h.reset < now) { h = { count: 0, reset: now + windowMs }; hits.set(req.ip, h); }
     h.count++;
     if (h.count > max) return res.status(429).json({ error: 'QUÁ NHIỀU YÊU CẦU' });
     next();
@@ -137,7 +99,6 @@ const verifyLimiter = rateLimit({ windowMs: 60000, max: 20 });
 const heartbeatLimiter = rateLimit({ windowMs: 60000, max: 60 });
 const adminLimiter = rateLimit({ windowMs: 60000, max: 60 });
 
-/* ===== HELPERS ===== */
 const KEY_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function generateKey(prefix = 'AIM') {
   const parts = [];
@@ -157,9 +118,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => {
-  res.json({ name: 'AIMLOCK KEY SERVER', version: '7.3.0', status: 'online', db: dbReady });
-});
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '8.0.0', status: 'online', db: dbReady }));
 
 /* ===== VERIFY ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
@@ -170,13 +129,10 @@ app.post('/api/verify', verifyLimiter, async (req, res) => {
 
   try {
     const act = await pool.query(
-      `UPDATE keys SET status = 'active', activated_at = NOW(), expires_at = NOW() + make_interval(days => COALESCE(duration_days, 30)), device_id = $1, last_seen = NOW()
-       WHERE key_code = $2 AND status = 'unused' RETURNING expires_at`,
+      `UPDATE keys SET status = 'active', activated_at = NOW(), expires_at = NOW() + make_interval(days => COALESCE(duration_days, 30)), device_id = $1, last_seen = NOW() WHERE key_code = $2 AND status = 'unused' RETURNING expires_at`,
       [deviceId, keyCode]
     );
-    if (act.rowCount === 1) {
-      return res.json({ valid: true, message: 'KÍCH HOẠT THÀNH CÔNG', key: keyCode, expiresAt: act.rows[0].expires_at });
-    }
+    if (act.rowCount === 1) return res.json({ valid: true, message: 'KÍCH HOẠT THÀNH CÔNG', key: keyCode, expiresAt: act.rows[0].expires_at });
 
     const result = await pool.query('SELECT * FROM keys WHERE key_code = $1', [keyCode]);
     if (result.rowCount === 0) return res.json({ valid: false, error: 'KEY KHÔNG TỒN TẠI' });
@@ -187,13 +143,8 @@ app.post('/api/verify', verifyLimiter, async (req, res) => {
       if (record.status !== 'expired') await pool.query(`UPDATE keys SET status = 'expired' WHERE key_code = $1`, [keyCode]);
       return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
     }
-
-    const bind = await pool.query(
-      `UPDATE keys SET device_id = COALESCE(device_id, $1), last_seen = NOW() WHERE key_code = $2 RETURNING device_id, expires_at`,
-      [deviceId, keyCode]
-    );
+    const bind = await pool.query(`UPDATE keys SET device_id = COALESCE(device_id, $1), last_seen = NOW() WHERE key_code = $2 RETURNING device_id, expires_at`, [deviceId, keyCode]);
     if (bind.rows[0].device_id !== deviceId) return res.json({ valid: false, error: 'KEY ĐÃ DÙNG TRÊN THIẾT BỊ KHÁC' });
-
     return res.json({ valid: true, message: 'XÁC THỰC THÀNH CÔNG', key: keyCode, expiresAt: bind.rows[0].expires_at });
   } catch (e) {
     console.error('Verify error:', e.message);
@@ -206,7 +157,6 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
   const { key, deviceId } = req.body || {};
   const keyCode = normalizeKey(key);
   if (!isValidKeyFormat(keyCode) || !isValidDeviceId(deviceId)) return res.json({ valid: false });
-
   try {
     const result = await pool.query('SELECT * FROM keys WHERE key_code = $1', [keyCode]);
     if (result.rowCount === 0) return res.json({ valid: false, error: 'KEY KHÔNG TỒN TẠI' });
@@ -217,7 +167,6 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
       return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
     }
     if (record.device_id !== deviceId) return res.json({ valid: false, error: 'DEVICE KHÔNG KHỚP' });
-
     await pool.query('UPDATE keys SET last_seen = NOW() WHERE key_code = $1', [keyCode]);
     return res.json({ valid: true, expiresAt: record.expires_at });
   } catch (e) { return res.status(500).json({ valid: false, error: 'LỖI SERVER' }); }
@@ -229,14 +178,12 @@ function safeEqual(a, b) {
   const hb = crypto.createHash('sha256').update(String(b)).digest();
   return crypto.timingSafeEqual(ha, hb);
 }
-
 function requireAdmin(req, res, next) {
   if (!ADMIN_READY) return res.status(503).json({ success: false, error: 'ADMIN CHƯA ĐƯỢC CẤU HÌNH' });
   const token = req.headers['x-admin-token'];
   if (!token || !safeEqual(token, ADMIN_TOKEN)) return res.status(403).json({ success: false, error: 'UNAUTHORIZED' });
   next();
 }
-
 const admin = [adminLimiter, requireAdmin];
 
 /* ===== ADMIN ROUTES ===== */
@@ -246,14 +193,10 @@ app.post('/api/admin/create', admin, async (req, res) => {
   const duration = Math.max(1, Math.min(parseInt(duration_days) || 30, 3650));
   const keyPrefix = (String(prefix || 'AIM').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)) || 'AIM';
   const createdKeys = [];
-
   try {
     while (createdKeys.length < numKeys) {
       const newKey = generateKey(keyPrefix);
-      const r = await pool.query(
-        `INSERT INTO keys (key_code, duration_days, note) VALUES ($1, $2, $3) ON CONFLICT (key_code) DO NOTHING`,
-        [newKey, duration, note ? String(note).slice(0, 200) : null]
-      );
+      const r = await pool.query(`INSERT INTO keys (key_code, duration_days, note) VALUES ($1, $2, $3) ON CONFLICT (key_code) DO NOTHING`, [newKey, duration, note ? String(note).slice(0, 200) : null]);
       if (r.rowCount === 1) createdKeys.push(newKey);
     }
     res.json({ success: true, count: createdKeys.length, keys: createdKeys });
@@ -268,7 +211,6 @@ app.post('/api/admin/list', admin, async (req, res) => {
     if (status && status !== 'all') { query += ' WHERE status = $1'; params.push(status); }
     query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1);
     params.push(Math.max(1, Math.min(parseInt(limit) || 100, 500)));
-
     const result = await pool.query(query, params);
     res.json({ success: true, count: result.rowCount, keys: result.rows });
   } catch (e) { res.status(500).json({ success: false, error: 'LỖI' }); }
@@ -276,9 +218,7 @@ app.post('/api/admin/list', admin, async (req, res) => {
 
 app.post('/api/admin/stats', admin, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'active') AS active, COUNT(*) FILTER (WHERE status = 'banned') AS banned, COUNT(*) FILTER (WHERE status = 'expired') AS expired, COUNT(*) FILTER (WHERE status = 'unused') AS unused FROM keys
-    `);
+    const result = await pool.query(`SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'active') AS active, COUNT(*) FILTER (WHERE status = 'banned') AS banned, COUNT(*) FILTER (WHERE status = 'expired') AS expired, COUNT(*) FILTER (WHERE status = 'unused') AS unused FROM keys`);
     const stats = result.rows[0];
     Object.keys(stats).forEach((k) => (stats[k] = parseInt(stats[k])));
     res.json({ success: true, stats });
@@ -318,33 +258,25 @@ app.post('/api/admin/extend', admin, async (req, res) => {
   const { key, days } = req.body || {};
   const extendDays = Math.max(1, Math.min(parseInt(days) || 30, 3650));
   try {
-    const result = await pool.query(
-      `UPDATE keys SET expires_at = GREATEST(COALESCE(expires_at, NOW()), NOW()) + make_interval(days => $1), status = 'active', activated_at = COALESCE(activated_at, NOW()) WHERE key_code = $2 RETURNING expires_at`,
-      [extendDays, normalizeKey(key)]
-    );
+    const result = await pool.query(`UPDATE keys SET expires_at = GREATEST(COALESCE(expires_at, NOW()), NOW()) + make_interval(days => $1), status = 'active', activated_at = COALESCE(activated_at, NOW()) WHERE key_code = $2 RETURNING expires_at`, [extendDays, normalizeKey(key)]);
     if (result.rowCount === 0) return res.json({ success: false, error: 'KEY KHÔNG TỒN TẠI' });
     res.json({ success: true, newExpiry: result.rows[0].expires_at });
   } catch (e) { res.status(500).json({ success: false, error: 'LỖI' }); }
 });
 
-/* ===== 404 & ERROR HANDLER ===== */
 app.use((req, res) => res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI' }));
 app.use((err, req, res, next) => {
   if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON KHÔNG HỢP LỆ' });
   if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'DỮ LIỆU QUÁ LỚN' });
-  console.error('Unhandled error:', err && err.message);
   res.status(500).json({ error: 'LỖI SERVER' });
 });
 
-/* ===== START ===== */
 const server = app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v7.3');
+  console.log('🚀 AIMLOCK KEY SERVER v8.0');
   console.log('📡 Port:', PORT);
   console.log('==========================================');
 });
-
-connectWithRetry();
 
 setInterval(async () => {
   if (!dbReady) return;
@@ -355,7 +287,6 @@ setInterval(async () => {
 }, 10 * 60 * 1000).unref();
 
 function shutdown() {
-  console.log('⏹ Đang tắt server...');
   server.close(() => pool.end().catch(() => {}).finally(() => process.exit(0)));
   setTimeout(() => process.exit(0), 8000).unref();
 }
