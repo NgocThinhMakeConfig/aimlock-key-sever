@@ -1,5 +1,5 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v9.0 - HOÀN CHỈNH (Không Auto-Clean)      */
+/* AIMLOCK KEY SERVER v10.0 - FINAL (Tự động Fix Database)      */
 /* ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
@@ -35,35 +35,47 @@ const dbConfig = {
 let dbReady = false;
 const pool = new Pool(dbConfig);
 
-// Bắt lỗi mất kết nối đột ngột
 pool.on('error', (err) => {
   console.error('❌ Lỗi Pool DB:', err.message);
-  dbReady = false; // Đánh dấu mất kết nối
+  dbReady = false;
 });
 
-// Hàm tự động tạo bảng
+// 🟢 HÀM TỰ ĐỘNG FIX DATABASE (Xóa bảng cũ lỗi và tạo lại bảng mới)
 async function initDB() {
   console.log('⏳ Đang kết nối tới Database...');
   await pool.query('SELECT 1');
   console.log('✅ Kết nối Database thành công!');
   
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS keys (
-      key_code TEXT PRIMARY KEY,
-      status TEXT DEFAULT 'unused',
-      duration_days INTEGER DEFAULT 30,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      activated_at TIMESTAMPTZ,
-      expires_at TIMESTAMPTZ,
-      device_id TEXT,
-      last_seen TIMESTAMPTZ,
-      note TEXT
-    );
-  `);
-  console.log('✅ Bảng keys đã sẵn sàng!');
+  try {
+    // Thử kiểm tra xem bảng keys có tồn tại và có cột status không
+    await pool.query('SELECT status FROM keys LIMIT 1');
+    console.log('✅ Bảng keys đã tồn tại và có đầy đủ cột.');
+  } catch (err) {
+    // Nếu có lỗi (ví dụ: column "status" does not exist hoặc bảng chưa có)
+    if (err.code === '42P01' || err.code === '42703') {
+      console.log('⚠️ Phát hiện bảng keys bị lỗi hoặc thiếu cột. Đang tự động xóa và tạo lại...');
+      await pool.query('DROP TABLE IF EXISTS keys');
+      
+      await pool.query(`
+        CREATE TABLE keys (
+          key_code TEXT PRIMARY KEY,
+          status TEXT DEFAULT 'unused',
+          duration_days INTEGER DEFAULT 30,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          activated_at TIMESTAMPTZ,
+          expires_at TIMESTAMPTZ,
+          device_id TEXT,
+          last_seen TIMESTAMPTZ,
+          note TEXT
+        );
+      `);
+      console.log('✅ Đã tạo lại bảng keys thành công với đầy đủ cột!');
+    } else {
+      throw err; // Các lỗi khác thì ném ra ngoài
+    }
+  }
 }
 
-// Hàm kết nối lại nếu thất bại
 async function connectWithRetry() {
   if (!process.env.DB_HOST) {
     console.error('⚠️ Chưa cấu hình DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT!');
@@ -91,7 +103,7 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '10kb' }));
 
-/* Rate Limit đơn giản */
+/* Rate Limit */
 function rateLimit({ windowMs, max }) {
   const hits = new Map();
   setInterval(() => {
@@ -132,7 +144,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '9.0.0', status: 'online', db: dbReady }));
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '10.0.0', status: 'online', db: dbReady }));
 
 /* ===== API: VERIFY ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
@@ -315,9 +327,10 @@ app.use((err, req, res, next) => {
 /* ===== START SERVER ===== */
 const server = app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v9.0');
+  console.log('🚀 AIMLOCK KEY SERVER v10.0');
   console.log('📡 Port:', PORT);
   console.log('✅ Auto-clean: ĐÃ TẮT HOÀN TOÀN');
+  console.log('✅ Auto-fix Database: ĐÃ BẬT');
   console.log('==========================================');
 });
 
