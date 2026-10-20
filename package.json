@@ -1,6 +1,6 @@
 {
   "name": "aimlock-key-server",
-  "version": "7.3.0",
+  "version": "8.1.0",
   "description": "Key server with PostgreSQL",
   "main": "server.js",
   "scripts": {
