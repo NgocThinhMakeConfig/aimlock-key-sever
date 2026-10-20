@@ -1,6 +1,5 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v5.0 - FINAL (PostgreSQL + Fix SSL)       */
-/* Tắt auto-clean, kết nối DB vĩnh viễn, fix lỗi self-signed    */
+/* AIMLOCK KEY SERVER v6.0 - FINAL (PostgreSQL + SSL Fix)       */
 /* ============================================================ */
 require('dotenv').config();
 const express = require('express');
@@ -13,11 +12,16 @@ app.disable('x-powered-by');
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 
-// 🟢 SỬA LỖI SSL TẠI ĐÂY: Luôn luôn bỏ qua kiểm tra chứng chỉ tự ký của Render DB
+// 🟢 CẤU HÌNH KẾT NỐI DATABASE (Fix lỗi SSL của Render)
+// Tự động loại bỏ các tham số SSL thừa trong URL nếu có, để không ghi đè cấu hình bên dưới
+let dbUrl = process.env.DATABASE_URL || '';
+dbUrl = dbUrl.replace('?sslmode=require', '').replace('&sslmode=require', '');
+dbUrl = dbUrl.replace('?ssl=true', '').replace('&ssl=true', '');
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: dbUrl,
   ssl: {
-    rejectUnauthorized: false
+    rejectUnauthorized: false // Bắt buộc phải có khi kết nối Render Postgres
   }
 });
 
@@ -75,7 +79,7 @@ function isValidKeyFormat(key) {
 
 /* ===== HEALTH CHECK ===== */
 app.get('/', (req, res) => {
-  res.json({ name: 'AIMLOCK KEY SERVER', version: '5.0.0', status: 'online', time: new Date().toISOString() });
+  res.json({ name: 'AIMLOCK KEY SERVER', version: '6.0.0', status: 'online', time: new Date().toISOString() });
 });
 
 /* ===== VERIFY KEY ===== */
@@ -295,7 +299,7 @@ app.use((req, res) => res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI
 /* ===== START ===== */
 app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v5.0 (PostgreSQL)');
+  console.log('🚀 AIMLOCK KEY SERVER v6.0 (PostgreSQL)');
   console.log('📡 Port:', PORT);
   console.log('✅ Đã kết nối Database tự động!');
   console.log('✅ Auto-clean: ĐÃ TẮT HOÀN TOÀN');
