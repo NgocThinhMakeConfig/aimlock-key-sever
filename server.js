@@ -11,12 +11,16 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 const PORT = process.env.PORT || 3000;
+// Đảm bảo độ dài >= 16 ký tự để ADMIN_READY = true
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123'; 
 
-/* ===== ADMIN TOKEN: thiếu thì khóa admin, server vẫn chạy bình thường ===== */
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123';
 const ADMIN_READY = ADMIN_TOKEN.length >= 16;
+
+if (!process.env.ADMIN_TOKEN) {
+  console.warn('⚠️  Bạn chưa set ADMIN_TOKEN trong Environment. Đang dùng token mặc định (nguy hiểm)!');
+}
 if (!ADMIN_READY) {
-  console.error('⚠️  ADMIN_TOKEN thiếu hoặc ngắn hơn 16 ký tự → các API /api/admin/* đang bị KHÓA. Hãy đặt ADMIN_TOKEN rồi deploy lại.');
+  console.error('❌ ADMIN_TOKEN quá ngắn (<16 ký tự) → API Admin bị khóa!');
 }
 
 /* ===== DATABASE ===== */
