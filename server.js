@@ -54,7 +54,7 @@ async function initDB() {
     // Nếu có lỗi (ví dụ: column "status" does not exist hoặc bảng chưa có)
     if (err.code === '42P01' || err.code === '42703') {
       console.log('⚠️ Phát hiện bảng keys bị lỗi hoặc thiếu cột. Đang tự động xóa và tạo lại...');
-      await pool.query('DROP TABLE IF EXISTS keys');
+      await pool.query('DROP TABLE IF EXISTS keys CASCADE');
       
       await pool.query(`
         CREATE TABLE keys (
