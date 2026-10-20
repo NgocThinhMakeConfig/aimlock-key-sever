@@ -1,6 +1,6 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v4.0 - POSTGRESQL FINAL                   */
-/* Lưu trữ vĩnh viễn, không bao giờ mất key                     */
+/* AIMLOCK KEY SERVER v4.5 - FINAL                              */
+/* Đã tắt hoàn toàn Auto-clean. Lưu trữ vĩnh viễn bằng Postgres */
 /* ============================================================ */
 require('dotenv').config();
 const express = require('express');
@@ -11,9 +11,9 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 
-// Kết nối Database
+// Kết nối Database (PostgreSQL trên Render)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false } // Bắt buộc đối với Render PostgreSQL
@@ -73,7 +73,7 @@ function isValidKeyFormat(key) {
 
 /* ===== HEALTH CHECK ===== */
 app.get('/', (req, res) => {
-  res.json({ name: 'AIMLOCK KEY SERVER', version: '4.0.0', status: 'online', time: new Date().toISOString() });
+  res.json({ name: 'AIMLOCK KEY SERVER', version: '4.5.0', status: 'online', time: new Date().toISOString() });
 });
 
 /* ===== VERIFY KEY ===== */
@@ -109,6 +109,7 @@ app.post('/api/verify', async (req, res) => {
       return res.json({ valid: true, message: 'KÍCH HOẠT THÀNH CÔNG', key: keyCode, expiresAt: expiresAt.toISOString() });
     }
 
+    // Check Device
     if (record.device_id && record.device_id !== deviceId) {
       return res.json({ valid: false, error: 'KEY ĐÃ DÙNG TRÊN THIẾT BỊ KHÁC' });
     }
@@ -292,9 +293,10 @@ app.use((req, res) => res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI
 /* ===== START ===== */
 app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v4.0 (PostgreSQL)');
+  console.log('🚀 AIMLOCK KEY SERVER v4.5 (PostgreSQL)');
   console.log('📡 Port:', PORT);
   console.log('✅ Đã kết nối Database tự động!');
+  console.log('✅ Auto-clean: ĐÃ TẮT HOÀN TOÀN');
   console.log('==========================================');
 });
 
