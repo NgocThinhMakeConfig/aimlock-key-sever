@@ -11,7 +11,7 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123';
 
 // Kết nối Database
 const pool = new Pool({
