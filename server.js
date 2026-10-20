@@ -1,5 +1,5 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v6.0 - FINAL (PostgreSQL + SSL Fix)       */
+/* AIMLOCK KEY SERVER v7.0 - DEBUG SSL                          */
 /* ============================================================ */
 require('dotenv').config();
 const express = require('express');
@@ -12,22 +12,30 @@ app.disable('x-powered-by');
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 
-// 🟢 CẤU HÌNH KẾT NỐI DATABASE (Fix lỗi SSL của Render)
-// Tự động loại bỏ các tham số SSL thừa trong URL nếu có, để không ghi đè cấu hình bên dưới
+// 🟢 XỬ LÝ URL: Loại bỏ mọi tham số SSL thừa để tránh ghi đè cấu hình
 let dbUrl = process.env.DATABASE_URL || '';
-dbUrl = dbUrl.replace('?sslmode=require', '').replace('&sslmode=require', '');
-dbUrl = dbUrl.replace('?ssl=true', '').replace('&ssl=true', '');
+// Xóa các tham số SSL phổ biến có thể gây xung đột
+dbUrl = dbUrl.replace(/[?&]sslmode=[^&]*/g, '');
+dbUrl = dbUrl.replace(/[?&]ssl=true/g, '');
+// Nếu chuỗi kết thúc bằng ? hoặc & sau khi xóa, hãy dọn dẹp
+dbUrl = dbUrl.replace(/[?&]$/, '');
 
 const pool = new Pool({
   connectionString: dbUrl,
   ssl: {
-    rejectUnauthorized: false // Bắt buộc phải có khi kết nối Render Postgres
+    rejectUnauthorized: false // Luôn chấp nhận chứng chỉ tự ký của Render
   }
 });
 
 // Tự động tạo bảng khi server khởi động
 async function initDB() {
   try {
+    console.log('⏳ Đang kết nối tới Database...');
+    // Thử một truy vấn đơn giản trước để kiểm tra kết nối
+    await pool.query('SELECT 1');
+    console.log('✅ Kết nối Database thành công!');
+
+    console.log('⏳ Đang tạo bảng keys (nếu chưa có)...');
     await pool.query(`
       CREATE TABLE IF NOT EXISTS keys (
         key_code TEXT PRIMARY KEY,
@@ -41,9 +49,19 @@ async function initDB() {
         note TEXT
       );
     `);
+    console.log('✅ Bảng keys đã sẵn sàng!');
     console.log('✅ Database đã sẵn sàng và kết nối thành công!');
   } catch (err) {
     console.error('❌ Lỗi khởi tạo DB chi tiết:', err.message);
+    console.error('❌ Mã lỗi:', err.code);
+    // In thêm thông tin để debug
+    if (err.code === '28P01') {
+      console.error('👉 Gợi ý: Sai mật khẩu. Hãy kiểm tra lại DATABASE_URL trên Render.');
+    } else if (err.code === 'ENOTFOUND') {
+      console.error('👉 Gợi ý: Sai hostname. Hãy chắc chắn dùng Internal Database URL.');
+    } else if (err.code === 'ECONNREFUSED') {
+      console.error('👉 Gợi ý: Database đang khởi động lại hoặc sai cổng.');
+    }
   }
 }
 initDB();
@@ -79,7 +97,7 @@ function isValidKeyFormat(key) {
 
 /* ===== HEALTH CHECK ===== */
 app.get('/', (req, res) => {
-  res.json({ name: 'AIMLOCK KEY SERVER', version: '6.0.0', status: 'online', time: new Date().toISOString() });
+  res.json({ name: 'AIMLOCK KEY SERVER', version: '7.0.0', status: 'online', time: new Date().toISOString() });
 });
 
 /* ===== VERIFY KEY ===== */
@@ -103,7 +121,6 @@ app.post('/api/verify', async (req, res) => {
       return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
     }
 
-    // Kích hoạt lần đầu
     if (record.status === 'unused' || !record.activated_at) {
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + (record.duration_days || 30));
@@ -115,7 +132,6 @@ app.post('/api/verify', async (req, res) => {
       return res.json({ valid: true, message: 'KÍCH HOẠT THÀNH CÔNG', key: keyCode, expiresAt: expiresAt.toISOString() });
     }
 
-    // Check Device
     if (record.device_id && record.device_id !== deviceId) {
       return res.json({ valid: false, error: 'KEY ĐÃ DÙNG TRÊN THIẾT BỊ KHÁC' });
     }
@@ -299,9 +315,8 @@ app.use((req, res) => res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI
 /* ===== START ===== */
 app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v6.0 (PostgreSQL)');
+  console.log('🚀 AIMLOCK KEY SERVER v7.0 (Debug SSL)');
   console.log('📡 Port:', PORT);
-  console.log('✅ Đã kết nối Database tự động!');
   console.log('✅ Auto-clean: ĐÃ TẮT HOÀN TOÀN');
   console.log('==========================================');
 });
