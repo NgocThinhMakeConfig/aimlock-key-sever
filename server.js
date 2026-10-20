@@ -1,41 +1,39 @@
 /* ============================================================ */
-/* NOVA KEY SERVER v3.3 — FIXED (No Auto-Delete)                */
-/* Đã tắt tính năng tự động xóa key để tránh mất key khi in     */
+/* AIMLOCK KEY SERVER v3.5 — ULTIMATE (No Auto-Delete)          */
+/* Lưu trữ an toàn, không bao giờ tự xóa key                    */
 /* ============================================================ */
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
-
 app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 
-// Lưu file JSON ở thư mục gốc (không dùng /tmp)
+// Lưu file JSON ở thư mục gốc
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'keys.json');
 
+/* ⭐ CORS FIX */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Access-Control-Expose-Headers', '*');
   res.setHeader('Access-Control-Max-Age', '86400');
-  
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
   next();
 });
 
 app.use(express.json({ limit: '10kb' }));
 
-/* ===== DATABASE (JSON) ===== */
+/* ===== DATABASE (JSON) - GHI AN TOÀN ===== */
 function loadDB() {
   try {
     if (fs.existsSync(DB_PATH)) {
-      return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+      const raw = fs.readFileSync(DB_PATH, 'utf8');
+      return JSON.parse(raw);
     }
   } catch(e) { 
     console.error('Load DB error:', e.message); 
@@ -45,14 +43,19 @@ function loadDB() {
 
 function saveDB(data) {
   try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
-  } catch(e) { console.error('Save error:', e.message); }
+    // Ghi ra file tạm trước, sau đó đổi tên (tránh lỗi file hỏng khi mất điện)
+    const tempPath = DB_PATH + '.tmp';
+    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
+    fs.renameSync(tempPath, DB_PATH);
+  } catch(e) { 
+    console.error('Save DB error:', e.message); 
+  }
 }
 
 let db = loadDB();
 
 /* ===== HELPERS ===== */
-function generateKey(prefix = 'NOVA') {
+function generateKey(prefix = 'AIM') {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let parts = [];
   for (let p = 0; p < 4; p++) {
@@ -83,16 +86,7 @@ function logAction(keyCode, action, deviceId, ip) {
 
 /* ===== HEALTH CHECK ===== */
 app.get('/', (req, res) => {
-  res.json({
-    name: 'NOVA KEY SERVER',
-    version: '3.3.0',
-    status: 'online',
-    time: new Date().toISOString()
-  });
-});
-
-app.get('/api/ping', (req, res) => {
-  res.json({ status: 'ok', time: new Date().toISOString(), uptime: process.uptime() });
+  res.json({ name: 'AIMLOCK KEY SERVER', version: '3.5.0', status: 'online', time: new Date().toISOString() });
 });
 
 /* ===== VERIFY KEY ===== */
@@ -100,10 +94,7 @@ app.post('/api/verify', (req, res) => {
   const { key, deviceId } = req.body;
   const ip = req.ip || 'unknown';
 
-  if (!isValidKeyFormat(key)) {
-    return res.json({ valid: false, error: 'KEY KHÔNG HỢP LỆ' });
-  }
-
+  if (!isValidKeyFormat(key)) return res.json({ valid: false, error: 'KEY KHÔNG HỢP LỆ' });
   if (!deviceId || typeof deviceId !== 'string' || deviceId.length < 5) {
     return res.json({ valid: false, error: 'THIẾU DEVICE ID' });
   }
@@ -139,7 +130,6 @@ app.post('/api/verify', (req, res) => {
       record.activated_at = new Date().toISOString();
       record.expires_at = expiresAt.toISOString();
       record.device_id = deviceId;
-      record.device_locked_at = new Date().toISOString();
       record.last_seen = new Date().toISOString();
       saveDB(db);
 
@@ -147,34 +137,22 @@ app.post('/api/verify', (req, res) => {
       console.log('[ACTIVATE]', keyCode, '→', deviceId);
 
       return res.json({
-        valid: true,
-        message: 'KÍCH HOẠT THÀNH CÔNG',
-        key: keyCode,
-        expiresAt: expiresAt.toISOString(),
-        deviceId: deviceId,
-        isFirstActivation: true
+        valid: true, message: 'KÍCH HOẠT THÀNH CÔNG', key: keyCode,
+        expiresAt: expiresAt.toISOString(), deviceId: deviceId, isFirstActivation: true
       });
     }
 
-    // Check Device (Khóa 1 máy)
+    // Check Device
     if (record.device_id && record.device_id !== deviceId) {
       logAction(keyCode, 'DEVICE_MISMATCH', deviceId, ip);
-      return res.json({
-        valid: false,
-        error: 'KEY ĐÃ DÙNG TRÊN THIẾT BỊ KHÁC'
-      });
+      return res.json({ valid: false, error: 'KEY ĐÃ DÙNG TRÊN THIẾT BỊ KHÁC' });
     }
 
     record.last_seen = new Date().toISOString();
     saveDB(db);
     logAction(keyCode, 'VERIFY_OK', deviceId, ip);
 
-    return res.json({
-      valid: true,
-      message: 'XÁC THỰC THÀNH CÔNG',
-      key: keyCode,
-      expiresAt: record.expires_at
-    });
+    return res.json({ valid: true, message: 'XÁC THỰC THÀNH CÔNG', key: keyCode, expiresAt: record.expires_at });
 
   } catch(e) {
     console.error('Verify error:', e);
@@ -192,23 +170,16 @@ app.post('/api/heartbeat', (req, res) => {
     const keyCode = key.toUpperCase();
     const record = db.keys[keyCode];
 
-    if (!record || record.status !== 'active') {
-      return res.json({ valid: false, error: 'KEY KHÔNG HOẠT ĐỘNG' });
-    }
-
+    if (!record || record.status !== 'active') return res.json({ valid: false, error: 'KEY KHÔNG HOẠT ĐỘNG' });
     if (record.expires_at && new Date(record.expires_at) < new Date()) {
       record.status = 'expired';
       saveDB(db);
       return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
     }
-
-    if (record.device_id && record.device_id !== deviceId) {
-      return res.json({ valid: false, error: 'DEVICE KHÔNG KHỚP' });
-    }
+    if (record.device_id && record.device_id !== deviceId) return res.json({ valid: false, error: 'DEVICE KHÔNG KHỚP' });
 
     record.last_seen = new Date().toISOString();
     saveDB(db);
-
     return res.json({ valid: true, expiresAt: record.expires_at });
 
   } catch(e) {
@@ -219,9 +190,7 @@ app.post('/api/heartbeat', (req, res) => {
 /* ===== ADMIN ===== */
 function requireAdmin(req, res, next) {
   const token = req.headers['x-admin-token'] || req.body.token;
-  if (token !== ADMIN_TOKEN) {
-    return res.status(403).json({ error: 'UNAUTHORIZED' });
-  }
+  if (token !== ADMIN_TOKEN) return res.status(403).json({ error: 'UNAUTHORIZED' });
   next();
 }
 
@@ -230,7 +199,7 @@ app.post('/api/admin/create', requireAdmin, (req, res) => {
   const { count, duration_days, prefix, note } = req.body;
   const numKeys = Math.min(parseInt(count) || 1, 100);
   const duration = parseInt(duration_days) || 30;
-  const keyPrefix = prefix || 'NOVA';
+  const keyPrefix = prefix || 'AIM';
 
   try {
     db = loadDB();
@@ -238,27 +207,15 @@ app.post('/api/admin/create', requireAdmin, (req, res) => {
 
     for (let i = 0; i < numKeys; i++) {
       let newKey = generateKey(keyPrefix);
-      let attempts = 0;
-      while (db.keys[newKey] && attempts < 10) {
-        newKey = generateKey(keyPrefix);
-        attempts++;
-      }
+      while (db.keys[newKey]) newKey = generateKey(keyPrefix); // Đảm bảo không trùng
 
       db.keys[newKey] = {
-        key_code: newKey,
-        status: 'unused',
-        duration_days: duration,
-        created_at: new Date().toISOString(),
-        activated_at: null,
-        expires_at: null,
-        device_id: null,
-        last_seen: null,
-        note: note || null
+        key_code: newKey, status: 'unused', duration_days: duration,
+        created_at: new Date().toISOString(), activated_at: null, expires_at: null,
+        device_id: null, last_seen: null, note: note || null
       };
-
       createdKeys.push(newKey);
     }
-
     saveDB(db);
     res.json({ success: true, count: createdKeys.length, keys: createdKeys });
   } catch(e) {
@@ -281,7 +238,7 @@ app.post('/api/admin/list', requireAdmin, (req, res) => {
   }
 });
 
-// Set status (Ban/Unban)
+// Set status
 app.post('/api/admin/set-status', requireAdmin, (req, res) => {
   const { key, status } = req.body;
   try {
@@ -291,9 +248,7 @@ app.post('/api/admin/set-status', requireAdmin, (req, res) => {
     db.keys[k].status = status;
     saveDB(db);
     res.json({ success: true });
-  } catch(e) {
-    res.status(500).json({ error: 'LỖI' });
-  }
+  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
 });
 
 // Delete
@@ -304,12 +259,10 @@ app.post('/api/admin/delete', requireAdmin, (req, res) => {
     const k = key.toUpperCase();
     if (db.keys[k]) { delete db.keys[k]; saveDB(db); return res.json({ success: true }); }
     res.json({ success: false });
-  } catch(e) {
-    res.status(500).json({ error: 'LỖI' });
-  }
+  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
 });
 
-// Reset device (Để đổi máy)
+// Reset device
 app.post('/api/admin/reset-device', requireAdmin, (req, res) => {
   const { key } = req.body;
   try {
@@ -320,9 +273,7 @@ app.post('/api/admin/reset-device', requireAdmin, (req, res) => {
     db.keys[k].last_seen = null;
     saveDB(db);
     res.json({ success: true, message: 'ĐÃ RESET THIẾT BỊ' });
-  } catch(e) {
-    res.status(500).json({ error: 'LỖI' });
-  }
+  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
 });
 
 // Extend
@@ -346,9 +297,7 @@ app.post('/api/admin/extend', requireAdmin, (req, res) => {
     record.status = 'active';
     saveDB(db);
     res.json({ success: true, newExpiry: newExpiry.toISOString() });
-  } catch(e) {
-    res.status(500).json({ error: 'LỖI' });
-  }
+  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
 });
 
 // Stats
@@ -360,17 +309,14 @@ app.post('/api/admin/stats', requireAdmin, (req, res) => {
     res.json({
       success: true,
       stats: {
-        total: keys.length,
-        active: keys.filter(k => k.status === 'active').length,
+        total: keys.length, active: keys.filter(k => k.status === 'active').length,
         banned: keys.filter(k => k.status === 'banned').length,
         expired: keys.filter(k => k.status === 'expired').length,
         unused: keys.filter(k => k.status === 'unused').length,
         online: keys.filter(k => k.status === 'active' && k.last_seen > fiveMinAgo).length
       }
     });
-  } catch(e) {
-    res.status(500).json({ error: 'LỖI' });
-  }
+  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
 });
 
 /* ===== 404 ===== */
@@ -381,12 +327,11 @@ app.use((req, res) => {
 /* ===== START ===== */
 app.listen(PORT, () => {
   console.log('==========================================');
-  console.log('🚀 NOVA KEY SERVER v3.3');
+  console.log('🚀 AIMLOCK KEY SERVER v3.5');
   console.log('📡 Port:', PORT);
   console.log('💾 DB:', DB_PATH);
-  console.log('✅ CORS: manual headers');
-  console.log('✅ Trust proxy: enabled');
-  console.log('⛔ Auto-clean: ĐÃ TẮT (Để tránh mất key)');
+  console.log('✅ Auto-clean: ĐÃ TẮT (Không tự xóa key)');
+  console.log('✅ Safe Save: ĐÃ BẬT (Chống hỏng file)');
   console.log('==========================================');
 });
 
