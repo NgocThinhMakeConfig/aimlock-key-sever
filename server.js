@@ -1,10 +1,8 @@
 /* ============================================================ */
-/* AIMLOCK KEY SERVER v3.5 — ULTIMATE (No Auto-Delete)          */
-/* Lưu trữ an toàn, không bao giờ tự xóa key                    */
+/* AIMLOCK KEY SERVER v4.1 — POSTGRESQL (Bảng riêng aimlock_keys)*/
 /* ============================================================ */
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
+const { Pool } = require('pg'); 
 
 const app = express();
 app.set('trust proxy', 1);
@@ -12,47 +10,45 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'aimlock_secret_2026';
 
-// Lưu file JSON ở thư mục gốc
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'keys.json');
+// Kết nối tới Database có sẵn
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Tự động tạo bảng aimlock_keys nếu chưa có
+async function initDB() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aimlock_keys (
+        id SERIAL PRIMARY KEY,
+        key_code TEXT UNIQUE NOT NULL,
+        status TEXT DEFAULT 'unused',
+        duration_days INTEGER DEFAULT 30,
+        created_at TIMESTAMP DEFAULT NOW(),
+        activated_at TIMESTAMP,
+        expires_at TIMESTAMP,
+        device_id TEXT,
+        last_seen TIMESTAMP,
+        note TEXT
+      );
+    `);
+    console.log('✅ Database đã sẵn sàng (Bảng aimlock_keys)');
+  } catch (err) {
+    console.error('❌ Lỗi kết nối DB:', err.message);
+  }
+}
+initDB();
 
 /* ⭐ CORS FIX */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
   res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Access-Control-Expose-Headers', '*');
-  res.setHeader('Access-Control-Max-Age', '86400');
   if (req.method === 'OPTIONS') return res.status(200).end();
   next();
 });
-
 app.use(express.json({ limit: '10kb' }));
-
-/* ===== DATABASE (JSON) - GHI AN TOÀN ===== */
-function loadDB() {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      const raw = fs.readFileSync(DB_PATH, 'utf8');
-      return JSON.parse(raw);
-    }
-  } catch(e) { 
-    console.error('Load DB error:', e.message); 
-  }
-  return { keys: {}, logs: [] };
-}
-
-function saveDB(data) {
-  try {
-    // Ghi ra file tạm trước, sau đó đổi tên (tránh lỗi file hỏng khi mất điện)
-    const tempPath = DB_PATH + '.tmp';
-    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
-    fs.renameSync(tempPath, DB_PATH);
-  } catch(e) { 
-    console.error('Save DB error:', e.message); 
-  }
-}
-
-let db = loadDB();
 
 /* ===== HELPERS ===== */
 function generateKey(prefix = 'AIM') {
@@ -60,64 +56,34 @@ function generateKey(prefix = 'AIM') {
   let parts = [];
   for (let p = 0; p < 4; p++) {
     let part = '';
-    for (let i = 0; i < 4; i++) {
-      part += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
+    for (let i = 0; i < 4; i++) part += chars.charAt(Math.floor(Math.random() * chars.length));
     parts.push(part);
   }
   return prefix + '-' + parts.join('-');
 }
 
-function isValidKeyFormat(key) {
-  if (!key || typeof key !== 'string') return false;
-  if (key.length < 10 || key.length > 40) return false;
-  return /^[A-Z0-9\-]+$/i.test(key);
+function requireAdmin(req, res, next) {
+  const token = req.headers['x-admin-token'] || req.body.token;
+  if (token !== ADMIN_TOKEN) return res.status(403).json({ error: 'UNAUTHORIZED' });
+  next();
 }
 
-function logAction(keyCode, action, deviceId, ip) {
-  db.logs.push({
-    key_code: keyCode, action: action,
-    device_id: deviceId || null, ip: ip || null,
-    timestamp: new Date().toISOString()
-  });
-  if (db.logs.length > 1000) db.logs = db.logs.slice(-500);
-  saveDB(db);
-}
-
-/* ===== HEALTH CHECK ===== */
-app.get('/', (req, res) => {
-  res.json({ name: 'AIMLOCK KEY SERVER', version: '3.5.0', status: 'online', time: new Date().toISOString() });
-});
-
-/* ===== VERIFY KEY ===== */
-app.post('/api/verify', (req, res) => {
+/* ===== API VERIFY ===== */
+app.post('/api/verify', async (req, res) => {
   const { key, deviceId } = req.body;
-  const ip = req.ip || 'unknown';
-
-  if (!isValidKeyFormat(key)) return res.json({ valid: false, error: 'KEY KHÔNG HỢP LỆ' });
-  if (!deviceId || typeof deviceId !== 'string' || deviceId.length < 5) {
-    return res.json({ valid: false, error: 'THIẾU DEVICE ID' });
-  }
+  if (!key || !deviceId) return res.json({ valid: false, error: 'THIẾU THÔNG TIN' });
 
   const keyCode = key.trim().toUpperCase();
 
   try {
-    db = loadDB(); 
-    const record = db.keys[keyCode];
+    const { rows } = await pool.query('SELECT * FROM aimlock_keys WHERE key_code = $1', [keyCode]);
+    const record = rows[0];
 
-    if (!record) {
-      logAction(keyCode, 'INVALID_KEY', deviceId, ip);
-      return res.json({ valid: false, error: 'KEY KHÔNG TỒN TẠI' });
-    }
-
-    if (record.status === 'banned') {
-      logAction(keyCode, 'BANNED_KEY', deviceId, ip);
-      return res.json({ valid: false, error: 'KEY ĐÃ BỊ KHÓA' });
-    }
-
+    if (!record) return res.json({ valid: false, error: 'KEY KHÔNG TỒN TẠI' });
+    if (record.status === 'banned') return res.json({ valid: false, error: 'KEY ĐÃ BỊ KHÓA' });
+    
     if (record.expires_at && new Date(record.expires_at) < new Date()) {
-      record.status = 'expired';
-      saveDB(db);
+      await pool.query('UPDATE aimlock_keys SET status = $1 WHERE id = $2', ['expired', record.id]);
       return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
     }
 
@@ -125,214 +91,112 @@ app.post('/api/verify', (req, res) => {
     if (record.status === 'unused' || !record.activated_at) {
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + (record.duration_days || 30));
+      
+      await pool.query(`
+        UPDATE aimlock_keys SET status = 'active', activated_at = NOW(), expires_at = $1, device_id = $2, last_seen = NOW() WHERE id = $3
+      `, [expiresAt, deviceId, record.id]);
 
-      record.status = 'active';
-      record.activated_at = new Date().toISOString();
-      record.expires_at = expiresAt.toISOString();
-      record.device_id = deviceId;
-      record.last_seen = new Date().toISOString();
-      saveDB(db);
-
-      logAction(keyCode, 'KEY_ACTIVATED', deviceId, ip);
-      console.log('[ACTIVATE]', keyCode, '→', deviceId);
-
-      return res.json({
-        valid: true, message: 'KÍCH HOẠT THÀNH CÔNG', key: keyCode,
-        expiresAt: expiresAt.toISOString(), deviceId: deviceId, isFirstActivation: true
-      });
+      return res.json({ valid: true, message: 'KÍCH HOẠT THÀNH CÔNG', key: keyCode, expiresAt: expiresAt.toISOString(), deviceId });
     }
 
     // Check Device
     if (record.device_id && record.device_id !== deviceId) {
-      logAction(keyCode, 'DEVICE_MISMATCH', deviceId, ip);
       return res.json({ valid: false, error: 'KEY ĐÃ DÙNG TRÊN THIẾT BỊ KHÁC' });
     }
 
-    record.last_seen = new Date().toISOString();
-    saveDB(db);
-    logAction(keyCode, 'VERIFY_OK', deviceId, ip);
-
+    await pool.query('UPDATE aimlock_keys SET last_seen = NOW() WHERE id = $1', [record.id]);
     return res.json({ valid: true, message: 'XÁC THỰC THÀNH CÔNG', key: keyCode, expiresAt: record.expires_at });
 
-  } catch(e) {
-    console.error('Verify error:', e);
-    res.json({ valid: false, error: 'LỖI SERVER' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ valid: false, error: 'LỖI SERVER' });
   }
 });
 
-/* ===== HEARTBEAT ===== */
-app.post('/api/heartbeat', (req, res) => {
-  const { key, deviceId } = req.body;
-  if (!key || !deviceId) return res.json({ valid: false });
-
-  try {
-    db = loadDB();
-    const keyCode = key.toUpperCase();
-    const record = db.keys[keyCode];
-
-    if (!record || record.status !== 'active') return res.json({ valid: false, error: 'KEY KHÔNG HOẠT ĐỘNG' });
-    if (record.expires_at && new Date(record.expires_at) < new Date()) {
-      record.status = 'expired';
-      saveDB(db);
-      return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
-    }
-    if (record.device_id && record.device_id !== deviceId) return res.json({ valid: false, error: 'DEVICE KHÔNG KHỚP' });
-
-    record.last_seen = new Date().toISOString();
-    saveDB(db);
-    return res.json({ valid: true, expiresAt: record.expires_at });
-
-  } catch(e) {
-    return res.json({ valid: false, error: 'LỖI SERVER' });
-  }
-});
-
-/* ===== ADMIN ===== */
-function requireAdmin(req, res, next) {
-  const token = req.headers['x-admin-token'] || req.body.token;
-  if (token !== ADMIN_TOKEN) return res.status(403).json({ error: 'UNAUTHORIZED' });
-  next();
-}
-
-// Tạo key
-app.post('/api/admin/create', requireAdmin, (req, res) => {
+/* ===== API ADMIN ===== */
+app.post('/api/admin/create', requireAdmin, async (req, res) => {
   const { count, duration_days, prefix, note } = req.body;
   const numKeys = Math.min(parseInt(count) || 1, 100);
   const duration = parseInt(duration_days) || 30;
   const keyPrefix = prefix || 'AIM';
 
   try {
-    db = loadDB();
     const createdKeys = [];
-
     for (let i = 0; i < numKeys; i++) {
       let newKey = generateKey(keyPrefix);
-      while (db.keys[newKey]) newKey = generateKey(keyPrefix); // Đảm bảo không trùng
-
-      db.keys[newKey] = {
-        key_code: newKey, status: 'unused', duration_days: duration,
-        created_at: new Date().toISOString(), activated_at: null, expires_at: null,
-        device_id: null, last_seen: null, note: note || null
-      };
+      await pool.query(`
+        INSERT INTO aimlock_keys (key_code, duration_days, note) VALUES ($1, $2, $3)
+      `, [newKey, duration, note || null]);
       createdKeys.push(newKey);
     }
-    saveDB(db);
     res.json({ success: true, count: createdKeys.length, keys: createdKeys });
-  } catch(e) {
+  } catch (e) {
     res.status(500).json({ error: 'LỖI TẠO KEY' });
   }
 });
 
-// List
-app.post('/api/admin/list', requireAdmin, (req, res) => {
+app.post('/api/admin/list', requireAdmin, async (req, res) => {
   const { status, limit } = req.body;
   try {
-    db = loadDB();
-    let keys = Object.values(db.keys);
-    if (status && status !== 'all') keys = keys.filter(k => k.status === status);
-    keys.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    keys = keys.slice(0, Math.min(parseInt(limit) || 100, 500));
-    res.json({ success: true, count: keys.length, keys });
-  } catch(e) {
+    let query = 'SELECT * FROM aimlock_keys';
+    let params = [];
+    if (status && status !== 'all') {
+      query += ' WHERE status = $1';
+      params.push(status);
+    }
+    query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1);
+    params.push(Math.min(parseInt(limit) || 100, 500));
+
+    const { rows } = await pool.query(query, params);
+    res.json({ success: true, count: rows.length, keys: rows });
+  } catch (e) {
     res.status(500).json({ error: 'LỖI' });
   }
 });
 
-// Set status
-app.post('/api/admin/set-status', requireAdmin, (req, res) => {
+app.post('/api/admin/stats', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT 
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE status = 'active') as active,
+        COUNT(*) FILTER (WHERE status = 'unused') as unused,
+        COUNT(*) FILTER (WHERE status = 'expired') as expired,
+        COUNT(*) FILTER (WHERE status = 'banned') as banned
+      FROM aimlock_keys
+    `);
+    res.json({ success: true, stats: rows[0] });
+  } catch (e) {
+    res.status(500).json({ error: 'LỖI' });
+  }
+});
+
+app.post('/api/admin/set-status', requireAdmin, async (req, res) => {
   const { key, status } = req.body;
   try {
-    db = loadDB();
-    const k = key.toUpperCase();
-    if (!db.keys[k]) return res.json({ success: false });
-    db.keys[k].status = status;
-    saveDB(db);
+    await pool.query('UPDATE aimlock_keys SET status = $1 WHERE key_code = $2', [status, key.toUpperCase()]);
     res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
+  } catch (e) { res.status(500).json({ error: 'LỖI' }); }
 });
 
-// Delete
-app.post('/api/admin/delete', requireAdmin, (req, res) => {
+app.post('/api/admin/delete', requireAdmin, async (req, res) => {
   const { key } = req.body;
   try {
-    db = loadDB();
-    const k = key.toUpperCase();
-    if (db.keys[k]) { delete db.keys[k]; saveDB(db); return res.json({ success: true }); }
-    res.json({ success: false });
-  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
+    await pool.query('DELETE FROM aimlock_keys WHERE key_code = $1', [key.toUpperCase()]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: 'LỖI' }); }
 });
 
-// Reset device
-app.post('/api/admin/reset-device', requireAdmin, (req, res) => {
+app.post('/api/admin/reset-device', requireAdmin, async (req, res) => {
   const { key } = req.body;
   try {
-    db = loadDB();
-    const k = key.toUpperCase();
-    if (!db.keys[k]) return res.json({ success: false });
-    db.keys[k].device_id = null;
-    db.keys[k].last_seen = null;
-    saveDB(db);
+    await pool.query('UPDATE aimlock_keys SET device_id = NULL, last_seen = NULL WHERE key_code = $1', [key.toUpperCase()]);
     res.json({ success: true, message: 'ĐÃ RESET THIẾT BỊ' });
-  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
-});
-
-// Extend
-app.post('/api/admin/extend', requireAdmin, (req, res) => {
-  const { key, days } = req.body;
-  const extendDays = parseInt(days) || 30;
-  try {
-    db = loadDB();
-    const k = key.toUpperCase();
-    if (!db.keys[k]) return res.json({ success: false });
-    const record = db.keys[k];
-    let newExpiry;
-    if (record.expires_at && new Date(record.expires_at) > new Date()) {
-      newExpiry = new Date(record.expires_at);
-      newExpiry.setDate(newExpiry.getDate() + extendDays);
-    } else {
-      newExpiry = new Date();
-      newExpiry.setDate(newExpiry.getDate() + extendDays);
-    }
-    record.expires_at = newExpiry.toISOString();
-    record.status = 'active';
-    saveDB(db);
-    res.json({ success: true, newExpiry: newExpiry.toISOString() });
-  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
-});
-
-// Stats
-app.post('/api/admin/stats', requireAdmin, (req, res) => {
-  try {
-    db = loadDB();
-    const keys = Object.values(db.keys);
-    const fiveMinAgo = new Date(Date.now() - 5 * 60000).toISOString();
-    res.json({
-      success: true,
-      stats: {
-        total: keys.length, active: keys.filter(k => k.status === 'active').length,
-        banned: keys.filter(k => k.status === 'banned').length,
-        expired: keys.filter(k => k.status === 'expired').length,
-        unused: keys.filter(k => k.status === 'unused').length,
-        online: keys.filter(k => k.status === 'active' && k.last_seen > fiveMinAgo).length
-      }
-    });
-  } catch(e) { res.status(500).json({ error: 'LỖI' }); }
-});
-
-/* ===== 404 ===== */
-app.use((req, res) => {
-  res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI' });
+  } catch (e) { res.status(500).json({ error: 'LỖI' }); }
 });
 
 /* ===== START ===== */
 app.listen(PORT, () => {
-  console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v3.5');
+  console.log('🚀 AIMLOCK KEY SERVER v4.1 (PostgreSQL)');
   console.log('📡 Port:', PORT);
-  console.log('💾 DB:', DB_PATH);
-  console.log('✅ Auto-clean: ĐÃ TẮT (Không tự xóa key)');
-  console.log('✅ Safe Save: ĐÃ BẬT (Chống hỏng file)');
-  console.log('==========================================');
 });
-
-process.on('SIGTERM', () => process.exit(0));
