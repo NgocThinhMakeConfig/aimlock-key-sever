@@ -1,86 +1,76 @@
-/* ============================================================ */
-/* AIMLOCK KEY SERVER v10.0 - FINAL (Tự động Fix Database)      */
-/* ============================================================ */
+/* ============================================================
+   AIMLOCK KEY SERVER v11.0 - STABLE & PRODUCTION READY
+   - Đã sửa lỗi bind port cho Render (0.0.0.0)
+   - Không bao giờ tự động DROP TABLE (An toàn dữ liệu 100%)
+   - Hỗ trợ chạy chung Database với NOVA Server
+   - Tự động phục hồi khi mất kết nối DB
+   ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const { Pool } = require('pg');
+const cors = require('cors');
 
 const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
+app.use(cors());
+app.use(express.json({ limit: '10kb' }));
 
 const PORT = process.env.PORT || 3000;
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123';
 
-// 🟢 ADMIN TOKEN
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123'; 
-const ADMIN_READY = ADMIN_TOKEN.length >= 16;
-if (!ADMIN_READY) {
-  console.error('❌ CẢNH BÁO: ADMIN_TOKEN trên Render đang ngắn hơn 16 ký tự. API Admin sẽ bị khóa!');
+if (ADMIN_TOKEN.length < 16) {
+  console.error('❌ CẢNH BÁO: ADMIN_TOKEN quá ngắn (<16 ký tự). Hãy đổi trên Render!');
 }
 
-/* ===== KẾT NỐI DATABASE ===== */
-const dbConfig = {
-  host: process.env.DB_HOST,
-  port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  ssl: { rejectUnauthorized: false }, // Bắt buộc cho Render PostgreSQL
-  max: 10,
+/* ===== KẾT NỐI DATABASE (Tối ưu cho Render) ===== */
+// Sử dụng DATABASE_URL để dễ dàng dùng chung với project NOVA
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('render.com') 
+       ? { rejectUnauthorized: false } : false,
+  max: 20, // Giới hạn 20 kết nối để chạy chung an toàn
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
-};
+});
 
 let dbReady = false;
-const pool = new Pool(dbConfig);
 
 pool.on('error', (err) => {
   console.error('❌ Lỗi Pool DB:', err.message);
   dbReady = false;
 });
 
-// 🟢 HÀM TỰ ĐỘNG FIX DATABASE (Xóa bảng cũ lỗi và tạo lại bảng mới)
+// 🟢 HÀM KHỞI TẠO DATABASE AN TOÀN TUYỆT ĐỐI
 async function initDB() {
   console.log('⏳ Đang kết nối tới Database...');
   await pool.query('SELECT 1');
   console.log('✅ Kết nối Database thành công!');
   
-  try {
-    // Thử kiểm tra xem bảng keys có tồn tại và có cột status không
-    await pool.query('SELECT status FROM keys LIMIT 1');
-    console.log('✅ Bảng keys đã tồn tại và có đầy đủ cột.');
-  } catch (err) {
-    // Nếu có lỗi (ví dụ: column "status" does not exist hoặc bảng chưa có)
-    if (err.code === '42P01' || err.code === '42703') {
-      console.log('⚠️ Phát hiện bảng keys bị lỗi hoặc thiếu cột. Đang tự động xóa và tạo lại...');
-      await pool.query('DROP TABLE IF EXISTS keys CASCADE');
-      
-      await pool.query(`
-        CREATE TABLE keys (
-          key_code TEXT PRIMARY KEY,
-          status TEXT DEFAULT 'unused',
-          duration_days INTEGER DEFAULT 30,
-          created_at TIMESTAMPTZ DEFAULT NOW(),
-          activated_at TIMESTAMPTZ,
-          expires_at TIMESTAMPTZ,
-          device_id TEXT,
-          last_seen TIMESTAMPTZ,
-          note TEXT
-        );
-      `);
-      console.log('✅ Đã tạo lại bảng keys thành công với đầy đủ cột!');
-    } else {
-      throw err; // Các lỗi khác thì ném ra ngoài
-    }
-  }
+  // Sử dụng IF NOT EXISTS để không bao giờ xóa bảng cũ
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS keys (
+      key_code TEXT PRIMARY KEY,
+      status TEXT DEFAULT 'unused',
+      duration_days INTEGER DEFAULT 30,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      activated_at TIMESTAMPTZ,
+      expires_at TIMESTAMPTZ,
+      device_id TEXT,
+      last_seen TIMESTAMPTZ,
+      note TEXT
+    );
+  `);
+  
+  // Tạo Index để tìm kiếm nhanh hơn
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_status ON keys(status);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_device_id ON keys(device_id);`);
+
+  console.log('✅ Bảng keys đã sẵn sàng và đầy đủ cột.');
 }
 
 async function connectWithRetry() {
-  if (!process.env.DB_HOST) {
-    console.error('⚠️ Chưa cấu hình DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT!');
-    return;
-  }
   for (let attempt = 1; !dbReady; attempt++) {
     try {
       await initDB();
@@ -93,17 +83,7 @@ async function connectWithRetry() {
 }
 connectWithRetry();
 
-/* ===== MIDDLEWARE ===== */
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Admin-Token');
-  if (req.method === 'OPTIONS') return res.status(204).end();
-  next();
-});
-app.use(express.json({ limit: '10kb' }));
-
-/* Rate Limit */
+/* ===== RATE LIMIT ===== */
 function rateLimit({ windowMs, max }) {
   const hits = new Map();
   setInterval(() => {
@@ -144,7 +124,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '10.0.0', status: 'online', db: dbReady }));
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '11.0.0', status: 'online', db: dbReady }));
 
 /* ===== API: VERIFY ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
@@ -154,6 +134,7 @@ app.post('/api/verify', verifyLimiter, async (req, res) => {
   if (!isValidDeviceId(deviceId)) return res.json({ valid: false, error: 'THIẾU DEVICE ID' });
 
   try {
+    // Thử kích hoạt key mới
     const act = await pool.query(
       `UPDATE keys SET status = 'active', activated_at = NOW(), expires_at = NOW() + make_interval(days => COALESCE(duration_days, 30)), device_id = $1, last_seen = NOW() WHERE key_code = $2 AND status = 'unused' RETURNING expires_at`,
       [deviceId, keyCode]
@@ -169,6 +150,7 @@ app.post('/api/verify', verifyLimiter, async (req, res) => {
       if (record.status !== 'expired') await pool.query(`UPDATE keys SET status = 'expired' WHERE key_code = $1`, [keyCode]);
       return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
     }
+    
     const bind = await pool.query(`UPDATE keys SET device_id = COALESCE(device_id, $1), last_seen = NOW() WHERE key_code = $2 RETURNING device_id, expires_at`, [deviceId, keyCode]);
     if (bind.rows[0].device_id !== deviceId) return res.json({ valid: false, error: 'KEY ĐÃ DÙNG TRÊN THIẾT BỊ KHÁC' });
     return res.json({ valid: true, message: 'XÁC THỰC THÀNH CÔNG', key: keyCode, expiresAt: bind.rows[0].expires_at });
@@ -193,9 +175,12 @@ app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
       return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
     }
     if (record.device_id !== deviceId) return res.json({ valid: false, error: 'DEVICE KHÔNG KHỚP' });
+    
     await pool.query('UPDATE keys SET last_seen = NOW() WHERE key_code = $1', [keyCode]);
     return res.json({ valid: true, expiresAt: record.expires_at });
-  } catch (e) { return res.status(500).json({ valid: false, error: 'LỖI SERVER' }); }
+  } catch (e) { 
+    return res.status(500).json({ valid: false, error: 'LỖI SERVER' }); 
+  }
 });
 
 /* ===== ADMIN AUTH ===== */
@@ -205,7 +190,6 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(ha, hb);
 }
 function requireAdmin(req, res, next) {
-  if (!ADMIN_READY) return res.status(503).json({ success: false, error: 'ADMIN CHƯA ĐƯỢC CẤU HÌNH' });
   const token = req.headers['x-admin-token'];
   if (!token || !safeEqual(token, ADMIN_TOKEN)) return res.status(403).json({ success: false, error: 'UNAUTHORIZED' });
   next();
@@ -219,8 +203,11 @@ app.post('/api/admin/create', admin, async (req, res) => {
   const duration = Math.max(1, Math.min(parseInt(duration_days) || 30, 3650));
   const keyPrefix = (String(prefix || 'AIM').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)) || 'AIM';
   const createdKeys = [];
+  
   try {
-    while (createdKeys.length < numKeys) {
+    let attempts = 0;
+    while (createdKeys.length < numKeys && attempts < numKeys * 2) {
+      attempts++;
       const newKey = generateKey(keyPrefix);
       const r = await pool.query(`INSERT INTO keys (key_code, duration_days, note) VALUES ($1, $2, $3) ON CONFLICT (key_code) DO NOTHING`, [newKey, duration, note ? String(note).slice(0, 200) : null]);
       if (r.rowCount === 1) createdKeys.push(newKey);
@@ -241,10 +228,10 @@ app.post('/api/admin/list', admin, async (req, res) => {
     if (status && status !== 'all') { query += ' WHERE status = $1'; params.push(status); }
     query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1);
     params.push(Math.max(1, Math.min(parseInt(limit) || 100, 500)));
+    
     const result = await pool.query(query, params);
     res.json({ success: true, count: result.rowCount, keys: result.rows });
   } catch (e) { 
-    console.error('Lỗi list key:', e.message);
     res.status(500).json({ success: false, error: e.message }); 
   }
 });
@@ -265,7 +252,6 @@ app.post('/api/admin/stats', admin, async (req, res) => {
     Object.keys(stats).forEach((k) => (stats[k] = parseInt(stats[k])));
     res.json({ success: true, stats });
   } catch (e) { 
-    console.error('Lỗi lấy stats:', e.message);
     res.status(500).json({ success: false, error: e.message }); 
   }
 });
@@ -325,12 +311,13 @@ app.use((err, req, res, next) => {
 });
 
 /* ===== START SERVER ===== */
-const server = app.listen(PORT, () => {
+// BẮT BUỘC: Bind vào '0.0.0.0' để Render có thể truy cập
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v10.0');
+  console.log('🚀 AIMLOCK KEY SERVER v11.0');
   console.log('📡 Port:', PORT);
-  console.log('✅ Auto-clean: ĐÃ TẮT HOÀN TOÀN');
-  console.log('✅ Auto-fix Database: ĐÃ BẬT');
+  console.log('✅ Database Auto-init: AN TOÀN (Không xóa dữ liệu)');
+  console.log('✅ Connection Pool: Tối ưu (max 20)');
   console.log('==========================================');
 });
 
@@ -344,6 +331,7 @@ setInterval(async () => {
 }, 10 * 60 * 1000).unref();
 
 function shutdown() {
+  console.log('Đang tắt server an toàn...');
   server.close(() => pool.end().catch(() => {}).finally(() => process.exit(0)));
   setTimeout(() => process.exit(0), 8000).unref();
 }
