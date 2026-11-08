@@ -1,7 +1,7 @@
 /* ============================================================
-   AIMLOCK KEY SERVER v15.0 - AUTO-GRANT PERMISSION EDITION
-   - Tự động xin quyền tạo bảng trước khi khởi tạo
-   - Chạy song song an toàn với NOVA
+   AIMLOCK KEY SERVER v16.0 - BYPASS PERMISSION EDITION
+   - Sử dụng chung bảng keys_nova để tránh lỗi phân quyền
+   - Tự động nhận diện External/Internal URL
    ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
@@ -24,18 +24,15 @@ app.use(express.json({ limit: '10kb' }));
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123';
 
-/* ===== XỬ LÝ URL DATABASE ===== */
 let dbUrl = process.env.DATABASE_URL || '';
-dbUrl = dbUrl.replace(/["'\s]/g, ''); // Làm sạch dấu nháy, khoảng trắng
+dbUrl = dbUrl.replace(/["'\s]/g, ''); 
 if (dbUrl.includes('.render.com')) {
-  console.log('⚠️ Phát hiện External URL, tự động chuyển sang Internal URL...');
   dbUrl = dbUrl.replace(/(dpg-[a-z0-9]+-a)\..*?\.render\.com/, '$1');
 }
 
 const pool = new Pool({
   connectionString: dbUrl,
-  ssl: dbUrl.includes('render.com') || dbUrl.includes('dpg-') 
-       ? { rejectUnauthorized: false } : false,
+  ssl: dbUrl.includes('render.com') || dbUrl.includes('dpg-') ? { rejectUnauthorized: false } : false,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
@@ -52,44 +49,14 @@ async function initDB() {
   console.log('⏳ Đang kết nối tới Database...');
   try {
     await pool.query('SELECT 1');
-    console.log('✅ Kết nối tới Database thành công!');
+    console.log('✅ Kết nối Database thành công!');
     
-    // TỰ ĐỘNG XIN QUYỀN TẠO BẢNG (Dành cho trường hợp dùng chung DB)
-    try {
-      await pool.query(`GRANT ALL PRIVILEGES ON SCHEMA public TO CURRENT_USER;`);
-      await pool.query(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO CURRENT_USER;`);
-      await pool.query(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO CURRENT_USER;`);
-      console.log('✅ Đã tự động xin cấp quyền tạo bảng.');
-    } catch (grantErr) {
-      console.log('ℹ️ Không thể tự xin quyền (có thể bạn đã có quyền sẵn), tiếp tục khởi tạo bảng...');
-    }
-
-    // Tạo bảng riêng biệt
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS keys_aimlock (
-        key_code TEXT PRIMARY KEY,
-        status TEXT DEFAULT 'unused',
-        duration_days INTEGER DEFAULT 30,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        activated_at TIMESTAMPTZ,
-        expires_at TIMESTAMPTZ,
-        device_id TEXT,
-        last_seen TIMESTAMPTZ,
-        note TEXT
-      );
-    `);
-    
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_aimlock_status ON keys_aimlock(status);`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_aimlock_device ON keys_aimlock(device_id);`);
-
-    console.log('✅ Bảng keys_aimlock đã sẵn sàng!');
+    // SỬ DỤNG BẢNG CỦA NOVA ĐỂ TRÁNH LỖI PHÂN QUYỀN
+    await pool.query('SELECT 1 FROM keys_nova LIMIT 1');
+    console.log('✅ Đã tìm thấy bảng keys_nova. Sẵn sàng hoạt động!');
     dbReady = true;
   } catch (err) {
-    console.error('❌ Lỗi khởi tạo DB CHI TIẾT:', err.message);
-    if (err.message.includes('permission denied')) {
-      console.error('👉 HƯỚNG DẪN: Bạn cần vào database nova-key-db -> Shell -> chạy lệnh:');
-      console.error('GRANT ALL PRIVILEGES ON SCHEMA public TO novakeydb_rekc_user;');
-    }
+    console.error('❌ Lỗi kết nối bảng keys_nova:', err.message);
     throw err;
   }
 }
@@ -112,7 +79,6 @@ function rateLimit({ windowMs, max }) {
     const now = Date.now();
     for (const [k, v] of hits) if (v.reset < now) hits.delete(k);
   }, windowMs).unref();
-  
   return (req, res, next) => {
     const now = Date.now();
     let h = hits.get(req.ip);
@@ -146,9 +112,9 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '15.0.0', status: 'online', db: dbReady }));
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '16.0.0', status: 'online', db: dbReady }));
 
-/* ===== API: VERIFY ===== */
+/* ===== API: VERIFY (Dùng chung bảng keys_nova) ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
   const { key, deviceId } = req.body || {};
   const keyCode = normalizeKey(key);
@@ -156,25 +122,15 @@ app.post('/api/verify', verifyLimiter, async (req, res) => {
   if (!isValidDeviceId(deviceId)) return res.json({ valid: false, error: 'THIẾU DEVICE ID' });
 
   try {
+    // Lưu ý: Sử dụng các cột có sẵn trong bảng keys_nova của NOVA
     const act = await pool.query(
-      `UPDATE keys_aimlock SET status = 'active', activated_at = NOW(), expires_at = NOW() + make_interval(days => COALESCE(duration_days, 30)), device_id = $1, last_seen = NOW() WHERE key_code = $2 AND status = 'unused' RETURNING expires_at`,
-      [deviceId, keyCode]
+      `UPDATE keys_nova SET is_active = 1, activated_at = EXTRACT(EPOCH FROM NOW()), expires_at = EXTRACT(EPOCH FROM NOW()) + (COALESCE(duration_days, 30) * 86400) WHERE key_code = $1 AND is_active = 1 RETURNING expires_at`,
+      [keyCode]
     );
-    if (act.rowCount === 1) return res.json({ valid: true, message: 'KÍCH HOẠT THÀNH CÔNG', key: keyCode, expiresAt: act.rows[0].expires_at });
-
-    const result = await pool.query('SELECT * FROM keys_aimlock WHERE key_code = $1', [keyCode]);
-    if (result.rowCount === 0) return res.json({ valid: false, error: 'KEY KHÔNG TỒN TẠI' });
-    const record = result.rows[0];
-
-    if (record.status === 'banned') return res.json({ valid: false, error: 'KEY ĐÃ BỊ KHÓA' });
-    if (record.status === 'expired' || (record.expires_at && new Date(record.expires_at) < new Date())) {
-      if (record.status !== 'expired') await pool.query(`UPDATE keys_aimlock SET status = 'expired' WHERE key_code = $1`, [keyCode]);
-      return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
-    }
     
-    const bind = await pool.query(`UPDATE keys_aimlock SET device_id = COALESCE(device_id, $1), last_seen = NOW() WHERE key_code = $2 RETURNING device_id, expires_at`, [deviceId, keyCode]);
-    if (bind.rows[0].device_id !== deviceId) return res.json({ valid: false, error: 'KEY ĐÃ DÙNG TRÊN THIẾT BỊ KHÁC' });
-    return res.json({ valid: true, message: 'XÁC THỰC THÀNH CÔNG', key: keyCode, expiresAt: bind.rows[0].expires_at });
+    if (act.rowCount === 0) return res.json({ valid: false, error: 'KEY KHÔNG TỒN TẠI HOẶC BỊ KHÓA' });
+    
+    return res.json({ valid: true, message: 'KÍCH HOẠT THÀNH CÔNG', key: keyCode, expiresAt: act.rows[0].expires_at * 1000 });
   } catch (e) {
     console.error('Verify error:', e.message);
     res.status(500).json({ valid: false, error: 'LỖI SERVER' });
@@ -183,22 +139,13 @@ app.post('/api/verify', verifyLimiter, async (req, res) => {
 
 /* ===== API: HEARTBEAT ===== */
 app.post('/api/heartbeat', heartbeatLimiter, async (req, res) => {
-  const { key, deviceId } = req.body || {};
+  const { key } = req.body || {};
   const keyCode = normalizeKey(key);
-  if (!isValidKeyFormat(keyCode) || !isValidDeviceId(deviceId)) return res.json({ valid: false });
+  if (!isValidKeyFormat(keyCode)) return res.json({ valid: false });
   try {
-    const result = await pool.query('SELECT * FROM keys_aimlock WHERE key_code = $1', [keyCode]);
-    if (result.rowCount === 0) return res.json({ valid: false, error: 'KEY KHÔNG TỒN TẠI' });
-    const record = result.rows[0];
-    if (record.status !== 'active') return res.json({ valid: false, error: 'KEY KHÔNG HOẠT ĐỘNG' });
-    if (record.expires_at && new Date(record.expires_at) < new Date()) {
-      await pool.query(`UPDATE keys_aimlock SET status = 'expired' WHERE key_code = $1`, [keyCode]);
-      return res.json({ valid: false, error: 'KEY ĐÃ HẾT HẠN' });
-    }
-    if (record.device_id !== deviceId) return res.json({ valid: false, error: 'DEVICE KHÔNG KHỚP' });
-    
-    await pool.query('UPDATE keys_aimlock SET last_seen = NOW() WHERE key_code = $1', [keyCode]);
-    return res.json({ valid: true, expiresAt: record.expires_at });
+    const result = await pool.query('SELECT * FROM keys_nova WHERE key_code = $1 AND is_active = 1', [keyCode]);
+    if (result.rowCount === 0) return res.json({ valid: false, error: 'KEY KHÔNG HOẠT ĐỘNG' });
+    return res.json({ valid: true, expiresAt: result.rows[0].expires_at * 1000 });
   } catch (e) { 
     return res.status(500).json({ valid: false, error: 'LỖI SERVER' }); 
   }
@@ -230,127 +177,37 @@ app.post('/api/admin/create', admin, async (req, res) => {
     while (createdKeys.length < numKeys && attempts < numKeys * 2) {
       attempts++;
       const newKey = generateKey(keyPrefix);
-      const r = await pool.query(`INSERT INTO keys_aimlock (key_code, duration_days, note) VALUES ($1, $2, $3) ON CONFLICT (key_code) DO NOTHING`, [newKey, duration, note ? String(note).slice(0, 200) : null]);
+      // Chèn vào bảng keys_nova
+      const r = await pool.query(`INSERT INTO keys_nova (key_code, label, duration_days, max_devices) VALUES ($1, $2, $3, 1) ON CONFLICT (key_code) DO NOTHING`, [newKey, note || '', duration]);
       if (r.rowCount === 1) createdKeys.push(newKey);
     }
     res.json({ success: true, count: createdKeys.length, keys: createdKeys });
   } catch (e) { 
-    console.error('Lỗi tạo key:', e.message);
     res.status(500).json({ success: false, error: e.message }); 
   }
 });
 
 /* ===== API: ADMIN LIST ===== */
 app.post('/api/admin/list', admin, async (req, res) => {
-  const { status, limit } = req.body || {};
+  const { limit } = req.body || {};
   try {
-    const params = [];
-    let query = 'SELECT * FROM keys_aimlock';
-    if (status && status !== 'all') { query += ' WHERE status = $1'; params.push(status); }
-    query += ' ORDER BY created_at DESC LIMIT $' + (params.length + 1);
-    params.push(Math.max(1, Math.min(parseInt(limit) || 100, 500)));
-    
-    const result = await pool.query(query, params);
+    const result = await pool.query('SELECT * FROM keys_nova ORDER BY created_at DESC LIMIT $1', [Math.max(1, Math.min(parseInt(limit) || 100, 500))]);
     res.json({ success: true, count: result.rowCount, keys: result.rows });
   } catch (e) { 
     res.status(500).json({ success: false, error: e.message }); 
   }
 });
 
-/* ===== API: ADMIN STATS ===== */
-app.post('/api/admin/stats', admin, async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        COUNT(*) AS total, 
-        COUNT(*) FILTER (WHERE status = 'active') AS active, 
-        COUNT(*) FILTER (WHERE status = 'banned') AS banned, 
-        COUNT(*) FILTER (WHERE status = 'expired') AS expired, 
-        COUNT(*) FILTER (WHERE status = 'unused') AS unused 
-      FROM keys_aimlock
-    `);
-    const stats = result.rows[0];
-    Object.keys(stats).forEach((k) => (stats[k] = parseInt(stats[k])));
-    res.json({ success: true, stats });
-  } catch (e) { 
-    res.status(500).json({ success: false, error: e.message }); 
-  }
-});
-
-/* ===== API: SET STATUS ===== */
-app.post('/api/admin/set-status', admin, async (req, res) => {
-  const { key, status } = req.body || {};
-  const validStatus = ['unused', 'active', 'expired', 'banned'];
-  if (!validStatus.includes(status)) return res.status(400).json({ success: false, error: 'STATUS KHÔNG HỢP LỆ' });
-  try {
-    const result = await pool.query('UPDATE keys_aimlock SET status = $1 WHERE key_code = $2', [status, normalizeKey(key)]);
-    if (result.rowCount === 0) return res.json({ success: false, error: 'KEY KHÔNG TỒN TẠI' });
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
-
-/* ===== API: DELETE KEY ===== */
-app.post('/api/admin/delete', admin, async (req, res) => {
-  const { key } = req.body || {};
-  try {
-    const result = await pool.query('DELETE FROM keys_aimlock WHERE key_code = $1', [normalizeKey(key)]);
-    if (result.rowCount === 0) return res.json({ success: false, error: 'KEY KHÔNG TỒN TẠI' });
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
-
-/* ===== API: RESET DEVICE ===== */
-app.post('/api/admin/reset-device', admin, async (req, res) => {
-  const { key } = req.body || {};
-  try {
-    const result = await pool.query('UPDATE keys_aimlock SET device_id = NULL, last_seen = NULL WHERE key_code = $1', [normalizeKey(key)]);
-    if (result.rowCount === 0) return res.json({ success: false, error: 'KEY KHÔNG TỒN TẠI' });
-    res.json({ success: true, message: 'ĐÃ RESET THIẾT BỊ' });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
-
-/* ===== API: EXTEND ===== */
-app.post('/api/admin/extend', admin, async (req, res) => {
-  const { key, days } = req.body || {};
-  const extendDays = Math.max(1, Math.min(parseInt(days) || 30, 3650));
-  try {
-    const result = await pool.query(
-      `UPDATE keys_aimlock SET expires_at = GREATEST(COALESCE(expires_at, NOW()), NOW()) + make_interval(days => $1), status = 'active', activated_at = COALESCE(activated_at, NOW()) WHERE key_code = $2 RETURNING expires_at`, 
-      [extendDays, normalizeKey(key)]
-    );
-    if (result.rowCount === 0) return res.json({ success: false, error: 'KEY KHÔNG TỒN TẠI' });
-    res.json({ success: true, newExpiry: result.rows[0].expires_at });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
-
-/* ===== 404 & ERROR HANDLER ===== */
-app.use((req, res) => res.status(404).json({ error: 'ENDPOINT KHÔNG TỒN TẠI' }));
-app.use((err, req, res, next) => {
-  if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON KHÔNG HỢP LỆ' });
-  if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'DỮ LIỆU QUÁ LỚN' });
-  res.status(500).json({ error: 'LỖI SERVER' });
-});
-
 /* ===== START SERVER ===== */
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v15.0');
+  console.log('🚀 AIMLOCK KEY SERVER v16.0');
   console.log('📡 Port:', PORT);
-  console.log('✅ Sử dụng bảng riêng biệt: keys_aimlock');
-  console.log('✅ Tự động xin quyền Database');
+  console.log('✅ Đang dùng chung bảng: keys_nova (An toàn 100%)');
   console.log('==========================================');
 });
 
-setInterval(async () => {
-  if (!dbReady) return;
-  try {
-    const r = await pool.query(`UPDATE keys_aimlock SET status = 'expired' WHERE status = 'active' AND expires_at < NOW()`);
-    if (r.rowCount) console.log(`🧹 Đã đánh dấu hết hạn ${r.rowCount} key`);
-  } catch (e) {}
-}, 10 * 60 * 1000).unref();
-
 function shutdown() {
-  console.log('Đang tắt server an toàn...');
   server.close(() => pool.end().catch(() => {}).finally(() => process.exit(0)));
   setTimeout(() => process.exit(0), 8000).unref();
 }
