@@ -1,20 +1,28 @@
 /* ============================================================
-   AIMLOCK KEY SERVER v11.0 - STABLE & PRODUCTION READY
-   - Đã sửa lỗi bind port cho Render (0.0.0.0)
-   - Không bao giờ tự động DROP TABLE (An toàn dữ liệu 100%)
-   - Hỗ trợ chạy chung Database với NOVA Server
-   - Tự động phục hồi khi mất kết nối DB
+   AIMLOCK KEY SERVER v11.5 - STABLE & LIGHTWEIGHT
+   - Đã loại bỏ thư viện 'cors' để tránh lỗi Cannot find module
+   - Tự động xử lý CORS bằng Middleware nội bộ
+   - Bind port '0.0.0.0' chuẩn Render
+   - Không bao giờ DROP TABLE, an toàn dữ liệu 100%
    ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const { Pool } = require('pg');
-const cors = require('cors');
 
 const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
-app.use(cors());
+
+// Middleware xử lý CORS thủ công (Không cần thư viện 'cors')
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Admin-Token, Authorization');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
 app.use(express.json({ limit: '10kb' }));
 
 const PORT = process.env.PORT || 3000;
@@ -24,13 +32,12 @@ if (ADMIN_TOKEN.length < 16) {
   console.error('❌ CẢNH BÁO: ADMIN_TOKEN quá ngắn (<16 ký tự). Hãy đổi trên Render!');
 }
 
-/* ===== KẾT NỐI DATABASE (Tối ưu cho Render) ===== */
-// Sử dụng DATABASE_URL để dễ dàng dùng chung với project NOVA
+/* ===== KẾT NỐI DATABASE ===== */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('render.com') 
        ? { rejectUnauthorized: false } : false,
-  max: 20, // Giới hạn 20 kết nối để chạy chung an toàn
+  max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 });
@@ -42,13 +49,11 @@ pool.on('error', (err) => {
   dbReady = false;
 });
 
-// 🟢 HÀM KHỞI TẠO DATABASE AN TOÀN TUYỆT ĐỐI
 async function initDB() {
   console.log('⏳ Đang kết nối tới Database...');
   await pool.query('SELECT 1');
   console.log('✅ Kết nối Database thành công!');
   
-  // Sử dụng IF NOT EXISTS để không bao giờ xóa bảng cũ
   await pool.query(`
     CREATE TABLE IF NOT EXISTS keys (
       key_code TEXT PRIMARY KEY,
@@ -63,7 +68,6 @@ async function initDB() {
     );
   `);
   
-  // Tạo Index để tìm kiếm nhanh hơn
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_status ON keys(status);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_device_id ON keys(device_id);`);
 
@@ -83,13 +87,14 @@ async function connectWithRetry() {
 }
 connectWithRetry();
 
-/* ===== RATE LIMIT ===== */
+/* ===== RATE LIMIT (Tự viết, không cần thư viện ngoài) ===== */
 function rateLimit({ windowMs, max }) {
   const hits = new Map();
   setInterval(() => {
     const now = Date.now();
     for (const [k, v] of hits) if (v.reset < now) hits.delete(k);
   }, windowMs).unref();
+  
   return (req, res, next) => {
     const now = Date.now();
     let h = hits.get(req.ip);
@@ -118,13 +123,12 @@ function normalizeKey(key) { return typeof key === 'string' ? key.trim().toUpper
 function isValidKeyFormat(key) { return /^[A-Z0-9-]{10,40}$/.test(key); }
 function isValidDeviceId(id) { return typeof id === 'string' && id.length >= 5 && id.length <= 200; }
 
-/* Chặn API nếu DB chưa sẵn sàng */
 app.use('/api', (req, res, next) => {
   if (!dbReady) return res.status(503).json({ error: 'DATABASE ĐANG KHỞI ĐỘNG, THỬ LẠI SAU' });
   next();
 });
 
-app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '11.0.0', status: 'online', db: dbReady }));
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '11.5.0', status: 'online', db: dbReady }));
 
 /* ===== API: VERIFY ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
@@ -134,7 +138,6 @@ app.post('/api/verify', verifyLimiter, async (req, res) => {
   if (!isValidDeviceId(deviceId)) return res.json({ valid: false, error: 'THIẾU DEVICE ID' });
 
   try {
-    // Thử kích hoạt key mới
     const act = await pool.query(
       `UPDATE keys SET status = 'active', activated_at = NOW(), expires_at = NOW() + make_interval(days => COALESCE(duration_days, 30)), device_id = $1, last_seen = NOW() WHERE key_code = $2 AND status = 'unused' RETURNING expires_at`,
       [deviceId, keyCode]
@@ -311,17 +314,15 @@ app.use((err, req, res, next) => {
 });
 
 /* ===== START SERVER ===== */
-// BẮT BUỘC: Bind vào '0.0.0.0' để Render có thể truy cập
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v11.0');
+  console.log('🚀 AIMLOCK KEY SERVER v11.5');
   console.log('📡 Port:', PORT);
-  console.log('✅ Database Auto-init: AN TOÀN (Không xóa dữ liệu)');
-  console.log('✅ Connection Pool: Tối ưu (max 20)');
+  console.log('✅ CORS: Đã tích hợp sẵn (Không cần thư viện)');
+  console.log('✅ Database Auto-init: AN TOÀN');
   console.log('==========================================');
 });
 
-// Tự động cập nhật trạng thái hết hạn (Không xóa key)
 setInterval(async () => {
   if (!dbReady) return;
   try {
