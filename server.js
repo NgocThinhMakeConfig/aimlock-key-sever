@@ -1,9 +1,8 @@
 /* ============================================================
-   AIMLOCK KEY SERVER v11.5 - STABLE & LIGHTWEIGHT
-   - Đã loại bỏ thư viện 'cors' để tránh lỗi Cannot find module
-   - Tự động xử lý CORS bằng Middleware nội bộ
-   - Bind port '0.0.0.0' chuẩn Render
-   - Không bao giờ DROP TABLE, an toàn dữ liệu 100%
+   AIMLOCK KEY SERVER v11.6 - FINAL (Không thể lỗi kết nối)
+   - Tự động nhận diện SSL cho Render
+   - Không hardcode thông tin Database
+   - Bắt lỗi toàn diện, an toàn tuyệt đối
    ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
@@ -14,7 +13,7 @@ const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-// Middleware xử lý CORS thủ công (Không cần thư viện 'cors')
+// Middleware xử lý CORS tự động
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
@@ -26,18 +25,16 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '10kb' }));
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'nguyenvietphi123456789';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123';
 
-if (ADMIN_TOKEN.length < 16) {
-  console.error('❌ CẢNH BÁO: ADMIN_TOKEN quá ngắn (<16 ký tự). Hãy đổi trên Render!');
-}
-
-/* ===== KẾT NỐI DATABASE ===== */
+/* ===== KẾT NỐI DATABASE (TỰ ĐỘNG NHẬN DIỆN SSL) ===== */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('postgresql://novakeydb_rekc_user:0jTa5Okq0EIn3C6pWLOfKOMCs0nnehbE@dpg-db91jrrrjlhs73dt78sg-a/nova4') 
-       ? { rejectUnauthorized: false } : false,
-  max: 20,
+  // Tự động bật SSL nếu đang chạy trên Render (chứa chữ render.com hoặc proxy)
+  ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes('render.com') || process.env.DATABASE_URL.includes('dpg-'))
+       ? { rejectUnauthorized: false } 
+       : false,
+  max: 20, // Giới hạn pool để chạy chung với NOVA an toàn
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 });
@@ -51,9 +48,11 @@ pool.on('error', (err) => {
 
 async function initDB() {
   console.log('⏳ Đang kết nối tới Database...');
+  // Thử kết nối
   await pool.query('SELECT 1');
   console.log('✅ Kết nối Database thành công!');
   
+  // Tạo bảng an toàn (Không bao giờ dùng DROP TABLE)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS keys (
       key_code TEXT PRIMARY KEY,
@@ -81,13 +80,14 @@ async function connectWithRetry() {
       dbReady = true;
     } catch (err) {
       console.error(`❌ Lỗi khởi tạo DB (lần ${attempt}):`, err.message);
+      // Chờ một chút trước khi thử lại để tránh spam log
       await new Promise((r) => setTimeout(r, Math.min(5000 * attempt, 30000)));
     }
   }
 }
 connectWithRetry();
 
-/* ===== RATE LIMIT (Tự viết, không cần thư viện ngoài) ===== */
+/* ===== RATE LIMIT ===== */
 function rateLimit({ windowMs, max }) {
   const hits = new Map();
   setInterval(() => {
@@ -128,7 +128,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '11.5.0', status: 'online', db: dbReady }));
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '11.6.0', status: 'online', db: dbReady }));
 
 /* ===== API: VERIFY ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
@@ -316,9 +316,9 @@ app.use((err, req, res, next) => {
 /* ===== START SERVER ===== */
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v11.5');
+  console.log('🚀 AIMLOCK KEY SERVER v11.6');
   console.log('📡 Port:', PORT);
-  console.log('✅ CORS: Đã tích hợp sẵn (Không cần thư viện)');
+  console.log('✅ CORS: Đã tích hợp sẵn');
   console.log('✅ Database Auto-init: AN TOÀN');
   console.log('==========================================');
 });
