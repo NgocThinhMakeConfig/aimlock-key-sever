@@ -1,9 +1,9 @@
 /* ============================================================
-   AIMLOCK KEY SERVER v12.0 - ULTIMATE STABLE
-   - Tự động sửa lỗi URL (Biến External URL thành Internal URL)
+   AIMLOCK KEY SERVER v13.0 - PERFECT EDITION
+   - Tự động làm sạch URL (xóa khoảng trắng, dấu nháy thừa)
+   - In log lỗi Database chi tiết để dễ dàng sửa
    - Tự động nhận diện SSL cho Render
-   - Bind port '0.0.0.0' chuẩn Render
-   - Không bao giờ DROP TABLE, an toàn 100%
+   - Bind port '0.0.0.0' chuẩn xác
    ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
@@ -26,15 +26,22 @@ app.use(express.json({ limit: '10kb' }));
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123';
 
-/* ===== TỰ ĐỘNG SỬA LỖI URL DATABASE ===== */
+/* ===== XỬ LÝ URL DATABASE (LÀM SẠCH) ===== */
 let dbUrl = process.env.DATABASE_URL || '';
-// Nếu phát hiện dùng External URL của Render, tự động chuyển thành Internal URL
+// 1. Xóa dấu nháy kép hoặc khoảng trắng thừa do copy/paste
+dbUrl = dbUrl.replace(/["'\s]/g, ''); 
+// 2. Tự động chuyển External URL thành Internal URL (nếu lỡ dán nhầm)
 if (dbUrl.includes('.render.com')) {
   console.log('⚠️ Phát hiện External URL, đang tự động chuyển sang Internal URL...');
   dbUrl = dbUrl.replace(/(dpg-[a-z0-9]+-a)\..*?\.render\.com/, '$1');
 }
-// Nếu URL có dấu ? (do copy dư), tự động cắt bỏ
-if (dbUrl.includes('?')) dbUrl = dbUrl.split('?')[0];
+
+if (!dbUrl) {
+  console.error('❌ CẢNH BÁO: Chưa có biến DATABASE_URL trong Environment!');
+} else {
+  // Log an toàn (ẩn mật khẩu) để kiểm tra
+  console.log('🔍 Đang dùng DB URL:', dbUrl.replace(/:[^:@]+@/, ':****@'));
+}
 
 const pool = new Pool({
   connectionString: dbUrl,
@@ -54,36 +61,49 @@ pool.on('error', (err) => {
 
 async function initDB() {
   console.log('⏳ Đang kết nối tới Database...');
-  await pool.query('SELECT 1');
-  console.log('✅ Kết nối Database thành công!');
-  
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS keys (
-      key_code TEXT PRIMARY KEY,
-      status TEXT DEFAULT 'unused',
-      duration_days INTEGER DEFAULT 30,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      activated_at TIMESTAMPTZ,
-      expires_at TIMESTAMPTZ,
-      device_id TEXT,
-      last_seen TIMESTAMPTZ,
-      note TEXT
-    );
-  `);
-  
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_status ON keys(status);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_device_id ON keys(device_id);`);
+  try {
+    await pool.query('SELECT 1');
+    console.log('✅ Kết nối Database thành công!');
+    
+    // Tạo bảng an toàn, không bao giờ xóa dữ liệu cũ
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS keys (
+        key_code TEXT PRIMARY KEY,
+        status TEXT DEFAULT 'unused',
+        duration_days INTEGER DEFAULT 30,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        activated_at TIMESTAMPTZ,
+        expires_at TIMESTAMPTZ,
+        device_id TEXT,
+        last_seen TIMESTAMPTZ,
+        note TEXT
+      );
+    `);
+    
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_status ON keys(status);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_keys_device_id ON keys(device_id);`);
 
-  console.log('✅ Bảng keys đã sẵn sàng và đầy đủ cột.');
+    console.log('✅ Bảng keys đã sẵn sàng và đầy đủ cột.');
+    dbReady = true;
+  } catch (err) {
+    // IN RA LỖI CHI TIẾT ĐỂ BIẾT ĐƯỜNG SỬA
+    console.error('❌ Lỗi khởi tạo DB CHI TIẾT:', err.message);
+    if (err.message.includes('password authentication failed')) {
+      console.error('👉 Gợi ý: Sai mật khẩu hoặc user trong DATABASE_URL.');
+    } else if (err.message.includes('ENOTFOUND')) {
+      console.error('👉 Gợi ý: Sai tên host (có thể bạn chưa chuyển sang Internal URL).');
+    } else if (err.message.includes('timeout')) {
+      console.error('👉 Gợi ý: Database đang khởi động hoặc bị chặn mạng.');
+    }
+    throw err;
+  }
 }
 
 async function connectWithRetry() {
   for (let attempt = 1; !dbReady; attempt++) {
     try {
       await initDB();
-      dbReady = true;
     } catch (err) {
-      console.error(`❌ Lỗi khởi tạo DB (lần ${attempt}):`, err.message);
       await new Promise((r) => setTimeout(r, Math.min(5000 * attempt, 30000)));
     }
   }
@@ -131,7 +151,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '12.0.0', status: 'online', db: dbReady }));
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '13.0.0', status: 'online', db: dbReady }));
 
 /* ===== API: VERIFY ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
@@ -319,9 +339,9 @@ app.use((err, req, res, next) => {
 /* ===== START SERVER ===== */
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v12.0');
+  console.log('🚀 AIMLOCK KEY SERVER v13.0');
   console.log('📡 Port:', PORT);
-  console.log('✅ Tự động nhận diện URL Database');
+  console.log('✅ Tự động làm sạch URL Database');
   console.log('✅ Database Auto-init: AN TOÀN');
   console.log('==========================================');
 });
