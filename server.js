@@ -26,7 +26,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '10kb' }));
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'nguyenvietphi123456789';
 
 if (ADMIN_TOKEN.length < 16) {
   console.error('❌ CẢNH BÁO: ADMIN_TOKEN quá ngắn (<16 ký tự). Hãy đổi trên Render!');
@@ -35,7 +35,7 @@ if (ADMIN_TOKEN.length < 16) {
 /* ===== KẾT NỐI DATABASE ===== */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('render.com') 
+  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('postgresql://novakeydb_rekc_user:0jTa5Okq0EIn3C6pWLOfKOMCs0nnehbE@dpg-db91jrrrjlhs73dt78sg-a/nova4') 
        ? { rejectUnauthorized: false } : false,
   max: 20,
   idleTimeoutMillis: 30000,
