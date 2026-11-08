@@ -1,8 +1,9 @@
 /* ============================================================
-   AIMLOCK KEY SERVER v11.6 - FINAL (Không thể lỗi kết nối)
+   AIMLOCK KEY SERVER v12.0 - ULTIMATE STABLE
+   - Tự động sửa lỗi URL (Biến External URL thành Internal URL)
    - Tự động nhận diện SSL cho Render
-   - Không hardcode thông tin Database
-   - Bắt lỗi toàn diện, an toàn tuyệt đối
+   - Bind port '0.0.0.0' chuẩn Render
+   - Không bao giờ DROP TABLE, an toàn 100%
    ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
@@ -13,7 +14,6 @@ const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-// Middleware xử lý CORS tự động
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
@@ -21,20 +21,26 @@ app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
-
 app.use(express.json({ limit: '10kb' }));
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'vietphi123_sieu_bao_mat_123';
 
-/* ===== KẾT NỐI DATABASE (TỰ ĐỘNG NHẬN DIỆN SSL) ===== */
+/* ===== TỰ ĐỘNG SỬA LỖI URL DATABASE ===== */
+let dbUrl = process.env.DATABASE_URL || '';
+// Nếu phát hiện dùng External URL của Render, tự động chuyển thành Internal URL
+if (dbUrl.includes('.render.com')) {
+  console.log('⚠️ Phát hiện External URL, đang tự động chuyển sang Internal URL...');
+  dbUrl = dbUrl.replace(/(dpg-[a-z0-9]+-a)\..*?\.render\.com/, '$1');
+}
+// Nếu URL có dấu ? (do copy dư), tự động cắt bỏ
+if (dbUrl.includes('?')) dbUrl = dbUrl.split('?')[0];
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  // Tự động bật SSL nếu đang chạy trên Render (chứa chữ render.com hoặc proxy)
-  ssl: process.env.DATABASE_URL && (process.env.DATABASE_URL.includes('render.com') || process.env.DATABASE_URL.includes('dpg-'))
-       ? { rejectUnauthorized: false } 
-       : false,
-  max: 20, // Giới hạn pool để chạy chung với NOVA an toàn
+  connectionString: dbUrl,
+  ssl: dbUrl.includes('render.com') || dbUrl.includes('dpg-') 
+       ? { rejectUnauthorized: false } : false,
+  max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 });
@@ -48,11 +54,9 @@ pool.on('error', (err) => {
 
 async function initDB() {
   console.log('⏳ Đang kết nối tới Database...');
-  // Thử kết nối
   await pool.query('SELECT 1');
   console.log('✅ Kết nối Database thành công!');
   
-  // Tạo bảng an toàn (Không bao giờ dùng DROP TABLE)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS keys (
       key_code TEXT PRIMARY KEY,
@@ -80,7 +84,6 @@ async function connectWithRetry() {
       dbReady = true;
     } catch (err) {
       console.error(`❌ Lỗi khởi tạo DB (lần ${attempt}):`, err.message);
-      // Chờ một chút trước khi thử lại để tránh spam log
       await new Promise((r) => setTimeout(r, Math.min(5000 * attempt, 30000)));
     }
   }
@@ -128,7 +131,7 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '11.6.0', status: 'online', db: dbReady }));
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '12.0.0', status: 'online', db: dbReady }));
 
 /* ===== API: VERIFY ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
@@ -316,9 +319,9 @@ app.use((err, req, res, next) => {
 /* ===== START SERVER ===== */
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v11.6');
+  console.log('🚀 AIMLOCK KEY SERVER v12.0');
   console.log('📡 Port:', PORT);
-  console.log('✅ CORS: Đã tích hợp sẵn');
+  console.log('✅ Tự động nhận diện URL Database');
   console.log('✅ Database Auto-init: AN TOÀN');
   console.log('==========================================');
 });
