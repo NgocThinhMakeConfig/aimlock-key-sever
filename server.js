@@ -1,8 +1,7 @@
 /* ============================================================
-   AIMLOCK KEY SERVER v14.0 - ABSOLUTE FINAL
-   - Tự động đổi tên bảng thành 'keys_aimlock' để tránh xung đột
-   - Tự động nhận diện và in ra lỗi phân quyền Database
-   - Chạy song song hoàn hảo với project NOVA
+   AIMLOCK KEY SERVER v15.0 - AUTO-GRANT PERMISSION EDITION
+   - Tự động xin quyền tạo bảng trước khi khởi tạo
+   - Chạy song song an toàn với NOVA
    ============================================================ */
 require('dotenv').config();
 const crypto = require('crypto');
@@ -55,7 +54,17 @@ async function initDB() {
     await pool.query('SELECT 1');
     console.log('✅ Kết nối tới Database thành công!');
     
-    // Tạo bảng với tên RIÊNG BIỆT (keys_aimlock) để không đụng hàng với NOVA (keys_nova)
+    // TỰ ĐỘNG XIN QUYỀN TẠO BẢNG (Dành cho trường hợp dùng chung DB)
+    try {
+      await pool.query(`GRANT ALL PRIVILEGES ON SCHEMA public TO CURRENT_USER;`);
+      await pool.query(`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO CURRENT_USER;`);
+      await pool.query(`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO CURRENT_USER;`);
+      console.log('✅ Đã tự động xin cấp quyền tạo bảng.');
+    } catch (grantErr) {
+      console.log('ℹ️ Không thể tự xin quyền (có thể bạn đã có quyền sẵn), tiếp tục khởi tạo bảng...');
+    }
+
+    // Tạo bảng riêng biệt
     await pool.query(`
       CREATE TABLE IF NOT EXISTS keys_aimlock (
         key_code TEXT PRIMARY KEY,
@@ -77,11 +86,9 @@ async function initDB() {
     dbReady = true;
   } catch (err) {
     console.error('❌ Lỗi khởi tạo DB CHI TIẾT:', err.message);
-    
-    // Bắt lỗi phân quyền và in ra hướng dẫn
     if (err.message.includes('permission denied')) {
-      console.error('👉 NGUYÊN NHÂN: User novakeydb_rekc_user không có quyền tạo bảng trong Database nova4.');
-      console.error('👉 CÁCH SỬA: Bạn phải cấp quyền cho user này (xem hướng dẫn bên dưới).');
+      console.error('👉 HƯỚNG DẪN: Bạn cần vào database nova-key-db -> Shell -> chạy lệnh:');
+      console.error('GRANT ALL PRIVILEGES ON SCHEMA public TO novakeydb_rekc_user;');
     }
     throw err;
   }
@@ -135,11 +142,11 @@ function isValidKeyFormat(key) { return /^[A-Z0-9-]{10,40}$/.test(key); }
 function isValidDeviceId(id) { return typeof id === 'string' && id.length >= 5 && id.length <= 200; }
 
 app.use('/api', (req, res, next) => {
-  if (!dbReady) return res.status(503).json({ error: 'DATABASE ĐANG KHỞI ĐỘNG HOẶC LỖI PHÂN QUYỀN, THỬ LẠI SAU' });
+  if (!dbReady) return res.status(503).json({ error: 'DATABASE ĐANG KHỞI ĐỘNG, THỬ LẠI SAU' });
   next();
 });
 
-app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '14.0.0', status: 'online', db: dbReady }));
+app.get('/', (req, res) => res.json({ name: 'AIMLOCK KEY SERVER', version: '15.0.0', status: 'online', db: dbReady }));
 
 /* ===== API: VERIFY ===== */
 app.post('/api/verify', verifyLimiter, async (req, res) => {
@@ -149,7 +156,6 @@ app.post('/api/verify', verifyLimiter, async (req, res) => {
   if (!isValidDeviceId(deviceId)) return res.json({ valid: false, error: 'THIẾU DEVICE ID' });
 
   try {
-    // SỬ DỤNG BẢNG keys_aimlock
     const act = await pool.query(
       `UPDATE keys_aimlock SET status = 'active', activated_at = NOW(), expires_at = NOW() + make_interval(days => COALESCE(duration_days, 30)), device_id = $1, last_seen = NOW() WHERE key_code = $2 AND status = 'unused' RETURNING expires_at`,
       [deviceId, keyCode]
@@ -328,10 +334,10 @@ app.use((err, req, res, next) => {
 /* ===== START SERVER ===== */
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('==========================================');
-  console.log('🚀 AIMLOCK KEY SERVER v14.0');
+  console.log('🚀 AIMLOCK KEY SERVER v15.0');
   console.log('📡 Port:', PORT);
   console.log('✅ Sử dụng bảng riêng biệt: keys_aimlock');
-  console.log('✅ Database Auto-init: AN TOÀN');
+  console.log('✅ Tự động xin quyền Database');
   console.log('==========================================');
 });
 
